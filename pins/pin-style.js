@@ -14,7 +14,12 @@
  * THE WRITE IS A DIRECT INLINE PROPERTY, not a custom-property token.
  * `border-radius: 14px` is written straight onto the root element, where it
  * outranks the stylesheet's `border-radius: var(--cc-radius-md, 10px)` on
- * specificity alone (an inline declaration beats any rule, with no `!important`).
+ * specificity alone (an inline declaration beats any ordinary rule, with no
+ * `!important`). The one exception is by design: `styles-css.js` gives
+ * `.cloudcanvas-pin.is-focused` its focus glow `box-shadow` with `!important`,
+ * which does outrank an inline write - so a bevel preset is defeated while the
+ * Pin holds focus, and reappears the moment it blurs. A focus indicator is not
+ * meant to be user-overridable, so this is correct, not a leak.
  * The alternative - writing `--cc-radius-md` inline and letting the existing
  * `var()` read pick it up - was rejected for three reasons:
  *
@@ -203,7 +208,9 @@ export function setPinStyle(pin, property, value) {
     else style.setProperty(property, trimmed);
   }
   reflow(pin, entry);
-  return trimmed;
+  // What the CSSOM actually holds, not the raw input: a value it silently
+  // rejected leaves '' in force, and the caller is owed that truth, not garbage.
+  return style ? style.getPropertyValue(property) : trimmed;
 }
 
 /**

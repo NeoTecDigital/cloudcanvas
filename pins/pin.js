@@ -16,6 +16,7 @@
  *   ./pin-lifecycle.js - activation, focus, lazy provisioning, reconciliation
  *   ./pin-traits.js    - trait resolution and attach/replace/detach bookkeeping
  *   ./pin-contents.js  - contents coercion, writes, and the key contract
+ *   ./pin-style.js     - per-Pin appearance overrides on the root element
  *   ./pin-vectors.js   - vector-list writes and the invalidation they owe
  *   ./pin-render.js    - the invalidation contract and the synchronous render
  *   ./pin-edit.js      - the edit lock that defers rendering into a live editor
@@ -28,6 +29,7 @@ import * as element from './pin-element.js';
 import * as lifecycle from './pin-lifecycle.js';
 import * as traitOps from './pin-traits.js';
 import * as contentOps from './pin-contents.js';
+import * as styleOps from './pin-style.js';
 import * as vectorOps from './pin-vectors.js';
 import * as renderOps from './pin-render.js';
 import * as edit from './pin-edit.js';
@@ -319,6 +321,26 @@ export class Pin extends EventTarget {
 
   /** @deprecated since 0.3.0 - use `new Map(pin.contents)`. Removed in 0.4.0. */
   getAllContents() { return new Map(this.contents); }
+
+  /* ------------------ APPEARANCE OVERRIDES API (./pin-style.js) ------------------ */
+
+  /**
+   * Override one appearance property on this Pin's own root box - its corner
+   * radius, surface colour, bevel, padding, or flow placement. An allow-listed
+   * CSS property written directly inline, where it outranks the stylesheet's
+   * token default; an empty value clears it. Distinct from `contents` (what a
+   * display trait renders) and from `chrome`/`bordered` (whole-card toggles).
+   */
+  setStyle(property, value) { return styleOps.setPinStyle(this, property, value); }
+
+  /** Drop one appearance override, restoring the stylesheet default. */
+  clearStyle(property) { return styleOps.clearPinStyle(this, property); }
+
+  /** The override in force for a property, or '' when there is none. */
+  getStyle(property) { return styleOps.getPinStyle(this, property); }
+
+  /** Every appearance override this Pin carries, as a plain object. */
+  get styleOverrides() { return styleOps.pinStyleMap(this); }
 
   /* ------------------ RENDERER INVALIDATION CONTRACT ------------------ */
 

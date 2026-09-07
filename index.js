@@ -66,6 +66,24 @@ export {
 export { reparentPin } from './pins/reparent.js';
 
 /**
+ * Per-Pin appearance overrides: the sanctioned mutator for one Pin's own root
+ * box (corner radius, surface colour, bevel, padding, flow placement) and the
+ * single table that is both its allow-list and an editor's field source. The
+ * map helpers are what serialization round-trips these through.
+ */
+export {
+  BEVEL_PRESETS,
+  STYLE_PROPERTIES,
+  applyPinStyleMap,
+  clearPinStyle,
+  getPinStyle,
+  isStyleProperty,
+  pinStyleMap,
+  setPinStyle,
+  stylePropertyInfo
+} from './pins/pin-style.js';
+
+/**
  * In-place reordering for flow containers (`pin.layout` is 'row' / 'column' /
  * 'grid'): `reorderChild` is the ordering primitive, `insertionSiblingFor` turns
  * a drop point into the sibling to insert before. Both sit beside `reparentPin`

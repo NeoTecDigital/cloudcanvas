@@ -1703,6 +1703,7 @@ __export(primitives_exports, {
   BADGE_SURFACE: () => BADGE_SURFACE,
   BADGE_TEXT_OVERRIDE_TOKEN: () => BADGE_TEXT_OVERRIDE_TOKEN,
   FOCUS_LABEL_COLOR: () => FOCUS_LABEL_COLOR,
+  connectorPathData: () => connectorPathData,
   contrastTextFor: () => contrastTextFor,
   createBadgeSVG: () => createBadgeSVG,
   createConnectorPathSVG: () => createConnectorPathSVG,
@@ -1851,15 +1852,18 @@ function createGradientMeterSVG(val, min = 0, max = 100, options = {}) {
   <div style="width: ${percent.toFixed(1)}%; height: 100%; background: linear-gradient(90deg, ${color}, var(--cc-meter-end, #ec4899)); border-radius: var(--cc-radius-pill, 9999px); transition: width 0.3s ease;"></div>
 </div>`.trim();
 }
-function createConnectorPathSVG(fromX, fromY, toX, toY, options = {}) {
-  const stroke = safeColor(options.stroke, "var(--cc-connector, rgba(56, 189, 248, 0.6))");
-  const strokeWidth = safeNumber(options.strokeWidth || 2, 2);
+function connectorPathData(fromX, fromY, toX, toY) {
   const x1 = safeNumber(fromX, 0);
   const y1 = safeNumber(fromY, 0);
   const x2 = safeNumber(toX, 0);
   const y2 = safeNumber(toY, 0);
   const dx = (x2 - x1) * 0.5;
-  const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+}
+function createConnectorPathSVG(fromX, fromY, toX, toY, options = {}) {
+  const stroke = safeColor(options.stroke, "var(--cc-connector, rgba(56, 189, 248, 0.6))");
+  const strokeWidth = safeNumber(options.strokeWidth || 2, 2);
+  const d = connectorPathData(fromX, fromY, toX, toY);
   return `
 <path d="${d}" fill="none" stroke="${stroke}" stroke-width="${strokeWidth}" stroke-dasharray="${options.dashed ? "6,4" : "none"}" vector-effect="non-scaling-stroke" />
   `.trim();
@@ -1933,12 +1937,12 @@ function createFocusCursorSVG(targetBounds, options = {}) {
   const x = minX - pad;
   const y = minY - pad;
   const w = safeNumber(targetBounds.maxX, 0) - minX + pad * 2;
-  const h = safeNumber(targetBounds.maxY, 0) - minY + pad * 2;
+  const h2 = safeNumber(targetBounds.maxY, 0) - minY + pad * 2;
   const path = `
     M ${x} ${y + cornerSize} L ${x} ${y} L ${x + cornerSize} ${y}
     M ${x + w - cornerSize} ${y} L ${x + w} ${y} L ${x + w} ${y + cornerSize}
-    M ${x + w} ${y + h - cornerSize} L ${x + w} ${y + h} L ${x + w - cornerSize} ${y + h}
-    M ${x + cornerSize} ${y + h} L ${x} ${y + h} L ${x} ${y + h - cornerSize}
+    M ${x + w} ${y + h2 - cornerSize} L ${x + w} ${y + h2} L ${x + w - cornerSize} ${y + h2}
+    M ${x + cornerSize} ${y + h2} L ${x} ${y + h2} L ${x} ${y + h2 - cornerSize}
   `.trim();
   return `
 <g class="cloudcanvas-focus-cursor">
@@ -2622,7 +2626,8 @@ var PinTrait = class {
     if (typeof options.onDetach === "function") this.onDetach = options.onDetach;
     if (typeof options.onTick === "function") this.onTick = options.onTick;
     if (typeof options.onRender === "function") this.onRender = options.onRender;
-    if (typeof options.onGlobalRender === "function") this.onGlobalRender = options.onGlobalRender;
+    if (typeof options.onGlobalBuild === "function") this.onGlobalBuild = options.onGlobalBuild;
+    if (typeof options.onGlobalUpdate === "function") this.onGlobalUpdate = options.onGlobalUpdate;
     if (typeof options.onActivate === "function") this.onActivate = options.onActivate;
     if (typeof options.onDeactivate === "function") this.onDeactivate = options.onDeactivate;
     if (typeof options.onFocus === "function") this.onFocus = options.onFocus;
@@ -2644,7 +2649,40 @@ var PinTrait = class {
   }
   onRender(pin, contents, element, context) {
   }
-  onGlobalRender(pinsWithThisTrait, globalContext) {
+  /**
+   * Build a global-render trait's persistent SVG subtree, once.
+   *
+   * The counterpart of a `DisplayTrait`'s `build`, at the group level: the SVG
+   * group layer (`../../engine/svg-groups.js`) hands over the trait's own
+   * `<g data-trait>` the first time the group is drawn, and this constructs
+   * whatever lives inside it - with `h()` (`../../graphics/primitives/element.js`),
+   * never `innerHTML` - and returns the live node bindings the update pass writes
+   * through. It is called exactly once per group; every subsequent draw is an
+   * `onGlobalUpdate`. A trait with no persistent structure returns the bindings
+   * it wants to keep (often just `{ host }`).
+   *
+   * @param {Element} host the trait's `<g>`, already in the SVG layer
+   * @param {Pin[]} pins the participating carriers
+   * @param {object} context the frame context
+   * @returns {object} bindings passed to every {@link onGlobalUpdate}
+   */
+  onGlobalBuild(host, pins, context) {
+    return { host };
+  }
+  /**
+   * Mutate a global-render trait's subtree on a frame its inputs moved.
+   *
+   * The counterpart of a `DisplayTrait`'s `update`: it runs only when the layer's
+   * dirty gate fired (a carrier moved, the trait bumped its `revision`, a
+   * dependency changed), and mutates the nodes `onGlobalBuild` returned - through
+   * the diffing kit (`setAttr`, `reconcileKeyedList`) so an unchanged node is
+   * never rewritten. An idle frame never reaches here at all.
+   *
+   * @param {object} bindings whatever {@link onGlobalBuild} returned
+   * @param {Pin[]} pins the participating carriers
+   * @param {object} context the frame context
+   */
+  onGlobalUpdate(bindings, pins, context) {
   }
   /**
    * Pins this trait's global render reads but does not carry.
@@ -3711,6 +3749,102 @@ function upperBound(value, lower) {
   return Math.max(number, lower);
 }
 
+// graphics/primitives/element.js
+var SVG_NS = "http://www.w3.org/2000/svg";
+var SVG_TAGS = /* @__PURE__ */ new Set([
+  "svg",
+  "g",
+  "defs",
+  "symbol",
+  "use",
+  "marker",
+  "clipPath",
+  "mask",
+  "pattern",
+  "path",
+  "rect",
+  "circle",
+  "ellipse",
+  "line",
+  "polyline",
+  "polygon",
+  "text",
+  "tspan",
+  "textPath",
+  "foreignObject",
+  "linearGradient",
+  "radialGradient",
+  "stop",
+  "filter",
+  "feGaussianBlur",
+  "feOffset",
+  "feBlend",
+  "feColorMatrix",
+  "feMerge",
+  "feMergeNode",
+  "title",
+  "desc",
+  "image"
+]);
+function createFor(tag) {
+  return SVG_TAGS.has(tag) ? document.createElementNS(SVG_NS, tag) : document.createElement(tag);
+}
+function applyAttr(element, name, value) {
+  if (value === null || value === void 0) return;
+  if (name === "class" || name === "className") {
+    element.setAttribute("class", String(value));
+    return;
+  }
+  if (name === "style") {
+    applyStyle(element, value);
+    return;
+  }
+  if (name.length > 2 && name.startsWith("on") && typeof value === "function") {
+    element.addEventListener(name.slice(2).toLowerCase(), value);
+    return;
+  }
+  if (typeof value === "boolean") {
+    if (value) element.setAttribute(name, "");
+    else element.removeAttribute(name);
+    return;
+  }
+  element.setAttribute(name, String(value));
+}
+function applyStyle(element, value) {
+  if (typeof value === "string") {
+    element.setAttribute("style", value);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [property, entry] of Object.entries(value)) {
+      if (entry === null || entry === void 0) continue;
+      element.style.setProperty(property, String(entry));
+    }
+  }
+}
+function appendChild(element, child) {
+  if (child === null || child === void 0 || child === false || child === true) return;
+  if (Array.isArray(child)) {
+    for (const entry of child) appendChild(element, entry);
+    return;
+  }
+  if (typeof child === "string" || typeof child === "number") {
+    element.appendChild(document.createTextNode(String(child)));
+    return;
+  }
+  if (child && typeof child.nodeType === "number") {
+    element.appendChild(child);
+  }
+}
+function h(tag, attrs, ...children) {
+  const element = createFor(tag);
+  if (attrs && typeof attrs === "object") {
+    for (const [name, value] of Object.entries(attrs)) applyAttr(element, name, value);
+  }
+  for (const child of children) appendChild(element, child);
+  return element;
+}
+
 // pins/traits/graph.js
 var TransmitterTrait = class extends PinTrait {
   constructor(options = {}) {
@@ -3855,38 +3989,103 @@ var ConnectableTrait = class extends PinTrait {
     return dependencies;
   }
   /**
-   * Draw one path per connection whose *both* endpoints take part in the current
-   * render root.
+   * The connector group's persistent container.
+   *
+   * There is no fixed structure to build - the paths come and go with the
+   * connections - so the build pass only hands the host `<g>` forward. Every
+   * actual `<path>` is created, moved and removed by the keyed reconcile in
+   * {@link onGlobalUpdate}, which is where the build/update discipline lives for
+   * a variable-length child list.
+   */
+  onGlobalBuild(host, pinsWithThisTrait, globalContext) {
+    return { host };
+  }
+  /**
+   * Reconcile one `<path>` per connection whose *both* endpoints take part in the
+   * current render root.
+   *
+   * This replaces the old re-stringify: instead of rebuilding the group's markup
+   * every dirty frame, the desired connectors are collected as keyed items and
+   * `reconcileKeyedList` reuses the `<path>` already holding each source->target
+   * key, creating one only for a genuinely new connection and removing the paths
+   * whose connection is gone. A path that stayed has only its `d` and stroke
+   * attributes re-set, and only when they moved.
    *
    * The layer has already filtered the source Pins it hands over; the targets are
-   * resolved here, from the pin map, so the same participation test has to be
-   * applied here too - otherwise a promoted subtree would trail connectors out to
-   * Pins that are no longer in the document.
+   * resolved here, from the pin map, so the same participation test is applied
+   * again - otherwise a promoted subtree would trail connectors out to Pins that
+   * are no longer in the document.
    */
-  onGlobalRender(pinsWithThisTrait, globalContext) {
-    let out = "";
+  onGlobalUpdate(bindings, pinsWithThisTrait, globalContext) {
+    const host = bindings.host;
     const pinMap = globalContext.pinMap;
-    if (!pinMap) return out;
+    if (!host) return;
     const participates = typeof globalContext.participates === "function" ? globalContext.participates : null;
+    reconcileKeyedList(host, pinMap ? this._connectorItems(pinsWithThisTrait, pinMap, participates) : [], {
+      key: (item) => item.key,
+      create: () => h("path", { fill: "none", "vector-effect": "non-scaling-stroke" }),
+      update: (node, item) => this._writeConnector(node, item)
+    });
+  }
+  /**
+   * The connectors to draw this frame, one item per participating source->target
+   * pair, each carrying the geometry and the drawing Pin's own stroke options.
+   *
+   * A fresh array per dirty frame is deliberate: this runs only when the layer's
+   * gate has already decided the group changed, never on an idle frame, so it is
+   * off the allocation-free path the idle gate protects (unlike
+   * `collectRenderDependencies`, which does run idle and refills in place).
+   */
+  _connectorItems(pinsWithThisTrait, pinMap, participates) {
+    const items = [];
     for (const sourcePin of pinsWithThisTrait) {
       const connTrait = sourcePin.traits.get(this.name);
       if (!connTrait || connTrait.connections.size === 0) continue;
       const p1 = sourcePin.getGlobalBounds();
-      const fromX = p1.centerX;
-      const fromY = p1.centerY;
       for (const targetId of connTrait.connections) {
         const targetPin = pinMap.get(targetId);
         if (!targetPin) continue;
         if (participates && !participates(targetPin)) continue;
         const p2 = targetPin.getGlobalBounds();
-        out += createConnectorPathSVG(fromX, fromY, p2.centerX, p2.centerY, {
-          stroke: connTrait.stroke,
-          strokeWidth: connTrait.strokeWidth,
+        items.push({
+          key: `${sourcePin.id}->${targetId}`,
+          d: connectorPathData(p1.centerX, p1.centerY, p2.centerX, p2.centerY),
+          stroke: safeColor(connTrait.stroke, "var(--cc-connector, rgba(56, 189, 248, 0.6))"),
+          strokeWidth: safeNumber(connTrait.strokeWidth || 2, 2),
           dashed: connTrait.dashed
         });
       }
     }
-    return out;
+    return items;
+  }
+  /**
+   * Write one connector item into its `<path>`, each attribute only when it moved.
+   *
+   * The per-node cache is stamped on the element itself (`_ccConnector`), so it
+   * survives the reconciler reusing, moving or reattaching the node and needs no
+   * parallel map. `stroke-dasharray` is `none` for a solid connector - the same
+   * value the string generator emitted - so the dashed/solid switch is a real
+   * attribute change rather than a removed attribute.
+   */
+  _writeConnector(node, item) {
+    const cache = node._ccConnector || (node._ccConnector = {});
+    const dash = item.dashed ? "6,4" : "none";
+    if (cache.d !== item.d) {
+      cache.d = item.d;
+      node.setAttribute("d", item.d);
+    }
+    if (cache.stroke !== item.stroke) {
+      cache.stroke = item.stroke;
+      node.setAttribute("stroke", item.stroke);
+    }
+    if (cache.strokeWidth !== item.strokeWidth) {
+      cache.strokeWidth = item.strokeWidth;
+      node.setAttribute("stroke-width", String(item.strokeWidth));
+    }
+    if (cache.dash !== dash) {
+      cache.dash = dash;
+      node.setAttribute("stroke-dasharray", dash);
+    }
   }
 };
 
@@ -5704,7 +5903,7 @@ var PinManager = class {
 };
 
 // engine/svg-groups.js
-var SVG_NS = "http://www.w3.org/2000/svg";
+var SVG_NS2 = "http://www.w3.org/2000/svg";
 var GLOBAL_RENDER_CAPABILITY = "global-render";
 var NO_VERSION = -1;
 var ALLOW_ALL = () => true;
@@ -5715,7 +5914,7 @@ function globalRenderTraits(manager, allows = ALLOW_ALL) {
     if (!bucket || bucket.size === 0) continue;
     const carriers = Array.from(bucket);
     const trait = carriers[0].traits.get(name);
-    if (!trait || typeof trait.onGlobalRender !== "function") continue;
+    if (!trait || typeof trait.onGlobalUpdate !== "function") continue;
     if (typeof trait.hasCapability !== "function") continue;
     if (!trait.hasCapability(GLOBAL_RENDER_CAPABILITY)) continue;
     found.push({ name, trait, pins: carriers.filter(allows) });
@@ -5787,7 +5986,14 @@ var SvgGroupLayer = class {
     this._dropGroups(live);
     return written;
   }
-  /** Rewrite one trait's group when - and only when - its inputs moved. */
+  /**
+   * Update one trait's group when - and only when - its inputs moved.
+   *
+   * The `<g>` is materialised first so `onGlobalBuild` has a host to populate,
+   * and the build runs exactly once per group: the bindings it returns are kept
+   * on the record and reused, so every later change is an `onGlobalUpdate` that
+   * mutates the existing subtree rather than rebuilding it.
+   */
   _renderTrait(entry, frame) {
     const record = this._record(entry.name);
     const revision = revisionOf(entry);
@@ -5795,8 +6001,11 @@ var SvgGroupLayer = class {
     record.viewportVersion = frame.viewportVersion;
     record.pinCount = entry.pins.length;
     record.revision = revision;
-    const svg = entry.trait.onGlobalRender(entry.pins, frame.context) || "";
-    this._element(entry.name, record).innerHTML = svg;
+    const host = this._element(entry.name, record);
+    if (!record.bindings) {
+      record.bindings = entry.trait.onGlobalBuild(host, entry.pins, frame.context) || { host };
+    }
+    entry.trait.onGlobalUpdate(record.bindings, entry.pins, frame.context);
     return true;
   }
   /**
@@ -5829,6 +6038,7 @@ var SvgGroupLayer = class {
     if (!record) {
       record = {
         element: null,
+        bindings: null,
         viewportVersion: NO_VERSION,
         pinCount: NO_VERSION,
         revision: NO_VERSION
@@ -5840,7 +6050,7 @@ var SvgGroupLayer = class {
   /** The trait's `<g>`, created and appended on first use. */
   _element(traitName, record) {
     if (record.element) return record.element;
-    const group = document.createElementNS(SVG_NS, "g");
+    const group = document.createElementNS(SVG_NS2, "g");
     group.setAttribute("data-trait", traitName);
     this.element.appendChild(group);
     record.element = group;
@@ -6486,7 +6696,7 @@ var ConjugateRenderer = class {
 };
 
 // pins/cursor.js
-var SVG_NS2 = "http://www.w3.org/2000/svg";
+var SVG_NS3 = "http://www.w3.org/2000/svg";
 var CURSOR_PIN_ID = "__cursor__";
 var CURSOR_CAPABILITY = "cursor";
 var CURSOR_FOCUS = "cursor-focus";
@@ -6505,7 +6715,7 @@ function createCursorLayer(overlayElement) {
   if (!overlayElement || typeof document === "undefined") return null;
   const existing = overlayElement.querySelector(`svg.${CURSOR_LAYER_CLASS}`);
   if (existing) return existing;
-  const layer = document.createElementNS(SVG_NS2, "svg");
+  const layer = document.createElementNS(SVG_NS3, "svg");
   layer.setAttribute("class", CURSOR_LAYER_CLASS);
   layer.setAttribute("style", LAYER_STYLE);
   overlayElement.appendChild(layer);
@@ -6616,7 +6826,7 @@ var CursorTrait = class extends PinTrait {
   /** The cursor's `<g>`, created inside the shared layer on first draw. */
   group() {
     if (this._group) return this._group;
-    const group = document.createElementNS(SVG_NS2, "g");
+    const group = document.createElementNS(SVG_NS3, "g");
     group.setAttribute("data-cursor", this.name);
     this.layer.appendChild(group);
     this._group = group;
@@ -6625,7 +6835,7 @@ var CursorTrait = class extends PinTrait {
   /** The cursor's one persistent shape node, created once with its static attributes. */
   shape(tag, attributes = {}) {
     if (this._shape) return this._shape;
-    const node = document.createElementNS(SVG_NS2, tag);
+    const node = document.createElementNS(SVG_NS3, tag);
     for (const [name, value] of Object.entries(attributes)) {
       node.setAttribute(name, value);
     }
@@ -8135,7 +8345,7 @@ function ownsItsKeys(target) {
 }
 
 // engine/host.js
-var SVG_NS3 = "http://www.w3.org/2000/svg";
+var SVG_NS4 = "http://www.w3.org/2000/svg";
 var LAYER_CLASSES = Object.freeze({
   SVG: "cloudcanvas-svg-layer",
   PLANE: "cloudcanvas-plane",
@@ -8156,7 +8366,7 @@ function mountLayers(session) {
   session._hostClassAdded = !host.classList.contains(HOST_CLASS);
   host.classList.add(HOST_CLASS);
   session.svgLayerElement = adoptOrCreate(host, LAYER_CLASSES.SVG, () => {
-    const svg = document.createElementNS(SVG_NS3, "svg");
+    const svg = document.createElementNS(SVG_NS4, "svg");
     svg.setAttribute("class", LAYER_CLASSES.SVG);
     return svg;
   });
@@ -9063,6 +9273,120 @@ function declarationsOf(body) {
   return declarations;
 }
 
+// graphics/tokens.js
+var TOKEN_CATEGORY = Object.freeze({
+  COLOR: "color",
+  SPACE: "space",
+  RADIUS: "radius",
+  SHADOW: "shadow",
+  TYPE: "type",
+  Z_INDEX: "z-index",
+  SIZE: "size",
+  LAYOUT: "layout"
+});
+var C = TOKEN_CATEGORY;
+var TOKENS = Object.freeze({
+  /* ---- foundations: colour ---- */
+  "--cc-bg": { category: C.COLOR, purpose: "Canvas background fill" },
+  "--cc-grid-dot": { category: C.COLOR, purpose: "Dot colour of the background grid" },
+  "--cc-text": { category: C.COLOR, purpose: "Primary body text colour" },
+  "--cc-text-muted": { category: C.COLOR, purpose: "Secondary/muted text colour" },
+  "--cc-accent": { category: C.COLOR, purpose: "Accent colour for selection and controls" },
+  "--cc-focus": { category: C.COLOR, purpose: "Focus ring / focused-Pin outline colour" },
+  "--cc-focus-glow": { category: C.COLOR, purpose: "Soft glow around a focused Pin" },
+  "--cc-focus-veil": { category: C.COLOR, purpose: "Dimming veil over the unfocused canvas" },
+  "--cc-focus-ring": { category: C.COLOR, purpose: "Keyboard focus-visible outline colour" },
+  "--cc-connector": { category: C.COLOR, purpose: "Default connector stroke colour" },
+  "--cc-cursor-focus": { category: C.COLOR, purpose: "Focus cursor reticle colour" },
+  "--cc-cursor-selected": { category: C.COLOR, purpose: "Selection cursor colour" },
+  "--cc-cursor-activated": { category: C.COLOR, purpose: "Activation cursor colour" },
+  "--cc-cursor-label": { category: C.COLOR, purpose: "Cursor caption text colour" },
+  "--cc-card-bg": { category: C.COLOR, purpose: "Card surface fill" },
+  "--cc-card-border": { category: C.COLOR, purpose: "Card border colour" },
+  "--cc-card-border-hover": { category: C.COLOR, purpose: "Card border colour on hover" },
+  "--cc-scope-bg": { category: C.COLOR, purpose: "Scope-well surface fill" },
+  "--cc-scope-border": { category: C.COLOR, purpose: "Scope-well dashed outline colour" },
+  "--cc-badge-bg": { category: C.COLOR, purpose: "Badge background fill" },
+  "--cc-badge-text": { category: C.COLOR, purpose: "Badge label colour" },
+  "--cc-badge-text-override": { category: C.COLOR, purpose: "Theme override for computed badge text colour" },
+  "--cc-badge-border": { category: C.COLOR, purpose: "Badge border colour" },
+  "--cc-btn-bg": { category: C.COLOR, purpose: "Action button background" },
+  "--cc-btn-bg-hover": { category: C.COLOR, purpose: "Action button background on hover" },
+  "--cc-btn-border": { category: C.COLOR, purpose: "Action button border colour" },
+  "--cc-btn-text": { category: C.COLOR, purpose: "Action button label colour" },
+  "--cc-meter-track": { category: C.COLOR, purpose: "Gradient-meter track colour" },
+  "--cc-meter-end": { category: C.COLOR, purpose: "Gradient-meter far-end colour" },
+  "--cc-menu-bg": { category: C.COLOR, purpose: "Context-menu surface fill" },
+  "--cc-menu-border": { category: C.COLOR, purpose: "Context-menu border colour" },
+  "--cc-menu-item-bg": { category: C.COLOR, purpose: "Context-menu item background" },
+  "--cc-menu-item-bg-hover": { category: C.COLOR, purpose: "Context-menu item background on hover" },
+  "--cc-resize-handle-bg": { category: C.COLOR, purpose: "Resize-handle fill colour" },
+  "--cc-resize-handle-ring": { category: C.COLOR, purpose: "Resize-handle outer ring shadow" },
+  "--cc-grab-handle-bg": { category: C.COLOR, purpose: "Chromeless grab-handle background" },
+  "--cc-grab-handle-dot": { category: C.COLOR, purpose: "Grab-handle grip-dot colour" },
+  "--cc-grab-handle-fill": { category: C.COLOR, purpose: "Grab-handle backing fill" },
+  "--cc-grab-handle-ring": { category: C.COLOR, purpose: "Grab-handle outer ring shadow" },
+  /* ---- foundations: spacing ---- */
+  "--cc-space-1": { category: C.SPACE, purpose: "Spacing step 1 (tightest)" },
+  "--cc-space-2": { category: C.SPACE, purpose: "Spacing step 2" },
+  "--cc-space-3": { category: C.SPACE, purpose: "Spacing step 3" },
+  "--cc-space-4": { category: C.SPACE, purpose: "Spacing step 4 (widest)" },
+  /* ---- foundations: radius ---- */
+  "--cc-radius-sm": { category: C.RADIUS, purpose: "Small corner radius (chips, insets)" },
+  "--cc-radius-md": { category: C.RADIUS, purpose: "Medium corner radius (cards, menus)" },
+  "--cc-radius-pill": { category: C.RADIUS, purpose: "Full pill radius (badges, meters)" },
+  /* ---- foundations: shadow ---- */
+  "--cc-shadow-1": { category: C.SHADOW, purpose: "Resting elevation shadow" },
+  "--cc-shadow-2": { category: C.SHADOW, purpose: "Raised elevation shadow (hover, drag)" },
+  "--cc-shadow-focus": { category: C.SHADOW, purpose: "Focused-Pin shadow stack" },
+  /* ---- foundations: type ---- */
+  "--cc-font": { category: C.TYPE, purpose: "Base font-family stack" },
+  "--cc-type-xs": { category: C.TYPE, purpose: "Extra-small type size" },
+  "--cc-type-sm": { category: C.TYPE, purpose: "Small type size" },
+  "--cc-type-md": { category: C.TYPE, purpose: "Medium (body) type size" },
+  "--cc-type-lg": { category: C.TYPE, purpose: "Large (title) type size" },
+  "--cc-weight-medium": { category: C.TYPE, purpose: "Medium font weight" },
+  "--cc-weight-semibold": { category: C.TYPE, purpose: "Semibold font weight" },
+  /* ---- foundations: stacking ---- */
+  "--cc-z-svg": { category: C.Z_INDEX, purpose: "SVG connector layer stacking order" },
+  "--cc-z-plane": { category: C.Z_INDEX, purpose: "Pin plane stacking order" },
+  "--cc-z-overlay": { category: C.Z_INDEX, purpose: "Cursor/overlay layer stacking order" },
+  "--cc-z-veil": { category: C.Z_INDEX, purpose: "Focus veil stacking order" },
+  "--cc-z-elevated": { category: C.Z_INDEX, purpose: "Elevated-Pin stacking order" },
+  "--cc-z-drag": { category: C.Z_INDEX, purpose: "Dragging/resizing Pin stacking order" },
+  "--cc-z-menu": { category: C.Z_INDEX, purpose: "Context-menu stacking order" },
+  /* ---- scalar geometry (themable knobs) ---- */
+  "--cc-grid-size": { category: C.SIZE, purpose: "Background grid cell size" },
+  "--cc-grid-dot-size": { category: C.SIZE, purpose: "Background grid dot radius" },
+  "--cc-card-blur": { category: C.SIZE, purpose: "Card backdrop blur radius" },
+  "--cc-card-max-width": { category: C.SIZE, purpose: "Max width of a self-sizing card" },
+  "--cc-media-max-height": { category: C.SIZE, purpose: "Max height of a media Pin image" },
+  "--cc-scope-min-height": { category: C.SIZE, purpose: "Minimum populated scope-well height" },
+  "--cc-control-min": { category: C.SIZE, purpose: "Minimum interactive control height" },
+  "--cc-control-min-coarse": { category: C.SIZE, purpose: "Minimum control height for coarse pointers" },
+  "--cc-menu-min-width": { category: C.SIZE, purpose: "Minimum context-menu width" },
+  "--cc-focus-ring-width": { category: C.SIZE, purpose: "Keyboard focus outline width" },
+  "--cc-focus-ring-offset": { category: C.SIZE, purpose: "Keyboard focus outline offset" },
+  "--cc-resize-handle-size": { category: C.SIZE, purpose: "Resize-handle size" },
+  "--cc-resize-handle-size-coarse": { category: C.SIZE, purpose: "Resize-handle size for coarse pointers" },
+  "--cc-grab-handle-size": { category: C.SIZE, purpose: "Grab-handle size" },
+  "--cc-grab-handle-size-coarse": { category: C.SIZE, purpose: "Grab-handle size for coarse pointers" },
+  /* ---- layout ---- */
+  "--cc-layout-gap": { category: C.LAYOUT, purpose: "Gap between flow-container children" },
+  "--cc-grid-columns": { category: C.LAYOUT, purpose: "Grid container column-track template" },
+  "--cc-scope-overflow": { category: C.LAYOUT, purpose: "Overflow behaviour of a populated scope well" }
+});
+var TOKEN_NAMES = Object.freeze(Object.keys(TOKENS));
+function isToken(name) {
+  return Object.prototype.hasOwnProperty.call(TOKENS, name);
+}
+function tokensInCategory(category) {
+  return Object.entries(TOKENS).filter(([, entry]) => entry.category === category);
+}
+function lightThemeValue(name) {
+  return LIGHT_THEME[name];
+}
+
 // index.js
 function createCanvasSession(options = {}) {
   return new CloudCanvasSession(options);
@@ -9137,8 +9461,14 @@ export {
   SCROLL_REGION_SELECTOR,
   STYLE_PROPERTIES,
   STYLE_RULES,
+  SVG_NS,
+  SVG_TAGS,
   ScopeTrait,
   SelectableTrait,
+  TOKENS,
+  TOKEN_CATEGORY,
+  TOKEN_NAMES,
+  TOKEN_PREFIX,
   TraitRegistry,
   TransmitterTrait,
   Viewport,
@@ -9163,12 +9493,15 @@ export {
   emitPinSignal,
   ensureVisible,
   getPinStyle,
+  h,
   hydrate,
   injectCanvasStyles,
   injectSessionStyles,
   insertionSiblingFor,
   isContextMenuOpen,
   isStyleProperty,
+  isToken,
+  lightThemeValue,
   makeElement,
   makeTextNode,
   menuItemsFor,
@@ -9201,6 +9534,7 @@ export {
   setVisible,
   stylePropertyInfo,
   styles_exports as styles,
+  tokensInCategory,
   traitRegistry,
   unbindKeyboard,
   unmountAnnouncer,

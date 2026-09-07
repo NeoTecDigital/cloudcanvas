@@ -176,11 +176,18 @@ export function createGradientMeterSVG(val, min = 0, max = 100, options = {}) {
 }
 
 /**
- * Generate an SVG connector path between two Pin coordinates
+ * The `d` of a smooth connector between two Pin centres.
+ *
+ * Pulled out of {@link createConnectorPathSVG} so the string generator and the
+ * live-node connector (`ConnectableTrait`, which builds real `<path>` elements
+ * through `h()`) compute the *same* curve from the *same* code - the geometry is
+ * one thing, and only its destination (a markup string vs. a node's `d`
+ * attribute) differs. Coordinates are coerced through {@link safeNumber} so a
+ * `NaN` centre degrades to `0` rather than writing the literal `NaN` into a path.
+ *
+ * @returns {string} an SVG path `d` (`M x1 y1 C ...`)
  */
-export function createConnectorPathSVG(fromX, fromY, toX, toY, options = {}) {
-  const stroke = safeColor(options.stroke, 'var(--cc-connector, rgba(56, 189, 248, 0.6))');
-  const strokeWidth = safeNumber(options.strokeWidth || 2, 2);
+export function connectorPathData(fromX, fromY, toX, toY) {
   const x1 = safeNumber(fromX, 0);
   const y1 = safeNumber(fromY, 0);
   const x2 = safeNumber(toX, 0);
@@ -188,7 +195,16 @@ export function createConnectorPathSVG(fromX, fromY, toX, toY, options = {}) {
   const dx = (x2 - x1) * 0.5;
 
   // Smooth bezier curve between pins
-  const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+}
+
+/**
+ * Generate an SVG connector path between two Pin coordinates
+ */
+export function createConnectorPathSVG(fromX, fromY, toX, toY, options = {}) {
+  const stroke = safeColor(options.stroke, 'var(--cc-connector, rgba(56, 189, 248, 0.6))');
+  const strokeWidth = safeNumber(options.strokeWidth || 2, 2);
+  const d = connectorPathData(fromX, fromY, toX, toY);
 
   // The SVG layer carries the camera transform, so the geometry is in canvas
   // space and the stroke would otherwise be scaled with it. `non-scaling-stroke`

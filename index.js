@@ -151,6 +151,28 @@ export {
 export { STYLE_RULES, checkStyleDiscipline } from './graphics/style-gates.js';
 
 /**
+ * The design-token catalogue: a JS-readable map of every `--cc-*` token to its
+ * category and purpose, so a component author or an appearance editor can
+ * enumerate what exists instead of grepping the stylesheet.
+ */
+export {
+  TOKENS,
+  TOKEN_CATEGORY,
+  TOKEN_NAMES,
+  TOKEN_PREFIX,
+  isToken,
+  tokensInCategory,
+  lightThemeValue
+} from './graphics/tokens.js';
+
+/**
+ * `h()`: the namespace-aware HTML+SVG element factory a `build` pass constructs
+ * its subtree with. Re-exported top-level because it is build-loop infrastructure
+ * every component and every global-render trait reaches for.
+ */
+export { h, SVG_NS, SVG_TAGS } from './graphics/primitives/element.js';
+
+/**
  * The colour maths is top-level, not just inside the `primitives` namespace: a
  * consumer picking a readable foreground for their own surface needs these two
  * far more often than they need an SVG generator.

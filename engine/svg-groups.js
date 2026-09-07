@@ -25,10 +25,17 @@
  *     else can see inside a trait: a connector added between two Pins that were
  *     both already carrying `connectable` changes no geometry and no count.
  *
- * An idle frame therefore performs zero `innerHTML` assignments.
+ * An idle frame therefore performs zero DOM writes.
  *
- * The trait contract is untouched: `trait.onGlobalRender(pins, context)` still
- * returns an SVG string. Only the destination changed.
+ * The trait contract is the same build-once/mutate-after discipline a
+ * `DisplayTrait` uses, lifted to the group level. A global-render trait no longer
+ * returns a string to be parsed into the group every frame; instead the layer
+ * calls `trait.onGlobalBuild(host, pins, context)` once - handing over the group
+ * `<g>` for the trait to populate with `h()` - and keeps the bindings it returns,
+ * then calls `trait.onGlobalUpdate(bindings, pins, context)` on the frames its
+ * gate decides the output moved. The old `innerHTML = string` rebuild, which is
+ * exactly the churn `DisplayTrait` exists to avoid, is gone: nothing here ever
+ * re-parses a group.
  */
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -64,7 +71,7 @@ export function globalRenderTraits(manager, allows = ALLOW_ALL) {
 
     const carriers = Array.from(bucket);
     const trait = carriers[0].traits.get(name);
-    if (!trait || typeof trait.onGlobalRender !== 'function') continue;
+    if (!trait || typeof trait.onGlobalUpdate !== 'function') continue;
     if (typeof trait.hasCapability !== 'function') continue;
     if (!trait.hasCapability(GLOBAL_RENDER_CAPABILITY)) continue;
 
@@ -180,7 +187,14 @@ export class SvgGroupLayer {
     return written;
   }
 
-  /** Rewrite one trait's group when - and only when - its inputs moved. */
+  /**
+   * Update one trait's group when - and only when - its inputs moved.
+   *
+   * The `<g>` is materialised first so `onGlobalBuild` has a host to populate,
+   * and the build runs exactly once per group: the bindings it returns are kept
+   * on the record and reused, so every later change is an `onGlobalUpdate` that
+   * mutates the existing subtree rather than rebuilding it.
+   */
   _renderTrait(entry, frame) {
     const record = this._record(entry.name);
     const revision = revisionOf(entry);
@@ -190,8 +204,11 @@ export class SvgGroupLayer {
     record.pinCount = entry.pins.length;
     record.revision = revision;
 
-    const svg = entry.trait.onGlobalRender(entry.pins, frame.context) || '';
-    this._element(entry.name, record).innerHTML = svg;
+    const host = this._element(entry.name, record);
+    if (!record.bindings) {
+      record.bindings = entry.trait.onGlobalBuild(host, entry.pins, frame.context) || { host };
+    }
+    entry.trait.onGlobalUpdate(record.bindings, entry.pins, frame.context);
     return true;
   }
 
@@ -228,6 +245,7 @@ export class SvgGroupLayer {
     if (!record) {
       record = {
         element: null,
+        bindings: null,
         viewportVersion: NO_VERSION,
         pinCount: NO_VERSION,
         revision: NO_VERSION

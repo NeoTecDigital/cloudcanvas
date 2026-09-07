@@ -133,7 +133,8 @@ export class PinTrait {
     if (typeof options.onDetach === 'function') this.onDetach = options.onDetach;
     if (typeof options.onTick === 'function') this.onTick = options.onTick;
     if (typeof options.onRender === 'function') this.onRender = options.onRender;
-    if (typeof options.onGlobalRender === 'function') this.onGlobalRender = options.onGlobalRender;
+    if (typeof options.onGlobalBuild === 'function') this.onGlobalBuild = options.onGlobalBuild;
+    if (typeof options.onGlobalUpdate === 'function') this.onGlobalUpdate = options.onGlobalUpdate;
     if (typeof options.onActivate === 'function') this.onActivate = options.onActivate;
     if (typeof options.onDeactivate === 'function') this.onDeactivate = options.onDeactivate;
     if (typeof options.onFocus === 'function') this.onFocus = options.onFocus;
@@ -158,7 +159,40 @@ export class PinTrait {
   onDetach(pin) {}
   onTick(pin, dt, context) {}
   onRender(pin, contents, element, context) {}
-  onGlobalRender(pinsWithThisTrait, globalContext) {}
+
+  /**
+   * Build a global-render trait's persistent SVG subtree, once.
+   *
+   * The counterpart of a `DisplayTrait`'s `build`, at the group level: the SVG
+   * group layer (`../../engine/svg-groups.js`) hands over the trait's own
+   * `<g data-trait>` the first time the group is drawn, and this constructs
+   * whatever lives inside it - with `h()` (`../../graphics/primitives/element.js`),
+   * never `innerHTML` - and returns the live node bindings the update pass writes
+   * through. It is called exactly once per group; every subsequent draw is an
+   * `onGlobalUpdate`. A trait with no persistent structure returns the bindings
+   * it wants to keep (often just `{ host }`).
+   *
+   * @param {Element} host the trait's `<g>`, already in the SVG layer
+   * @param {Pin[]} pins the participating carriers
+   * @param {object} context the frame context
+   * @returns {object} bindings passed to every {@link onGlobalUpdate}
+   */
+  onGlobalBuild(host, pins, context) { return { host }; }
+
+  /**
+   * Mutate a global-render trait's subtree on a frame its inputs moved.
+   *
+   * The counterpart of a `DisplayTrait`'s `update`: it runs only when the layer's
+   * dirty gate fired (a carrier moved, the trait bumped its `revision`, a
+   * dependency changed), and mutates the nodes `onGlobalBuild` returned - through
+   * the diffing kit (`setAttr`, `reconcileKeyedList`) so an unchanged node is
+   * never rewritten. An idle frame never reaches here at all.
+   *
+   * @param {object} bindings whatever {@link onGlobalBuild} returned
+   * @param {Pin[]} pins the participating carriers
+   * @param {object} context the frame context
+   */
+  onGlobalUpdate(bindings, pins, context) {}
 
   /**
    * Pins this trait's global render reads but does not carry.

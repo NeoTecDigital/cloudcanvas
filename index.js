@@ -91,6 +91,28 @@ export {
  */
 export { reorderChild, insertionSiblingFor } from './pins/reparent.js';
 
+/**
+ * Pin-to-Pin reactions: "when Pin A emits signal X, run action Y on Pin B",
+ * wired with no code. `ActionRegistry` is the open, `TraitRegistry`-shaped set of
+ * what a reaction can *do* (each action declaring the parameters an editor renders
+ * fields for); `attachReactions` starts a runner that rides the existing
+ * `pinManager.onSignal` surface, and `reactionsFor` is where a session's bindings
+ * live so a serializer or an editor can reach the same store the runner reads.
+ */
+export {
+  ActionRegistry,
+  actionRegistry,
+  registerBuiltinActions,
+  PARAM_CONTROLS
+} from './pins/reaction-actions.js';
+export {
+  ReactionStore,
+  ReactionRunner,
+  attachReactions,
+  detachReactions,
+  reactionsFor
+} from './pins/reactions.js';
+
 /* ---- everyday: how a container lays its children out ---- */
 export {
   LAYOUT_MODES,

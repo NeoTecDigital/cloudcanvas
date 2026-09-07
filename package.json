@@ -1,0 +1,51 @@
+{
+  "name": "cloudcanvas",
+  "version": "0.4.0",
+  "description": "Minimalist client-side GUI framework treating HTML elements as canvas pins",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./styles": "./graphics/styles.js",
+    "./styles.css": "./graphics/styles-css.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "engine",
+    "graphics",
+    "pins",
+    "particles",
+    "dist",
+    "README.md",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.js"
+  },
+  "keywords": [
+    "canvas",
+    "gui",
+    "pins",
+    "particles",
+    "browser-engine"
+  ],
+  "author": "Richard Christopher, NeoTec, LLC",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NeoTecDigital/cloudcanvas.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NeoTecDigital/cloudcanvas/issues"
+  },
+  "homepage": "https://github.com/NeoTecDigital/cloudcanvas#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

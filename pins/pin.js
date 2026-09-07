@@ -1,0 +1,569 @@
+/**
+ * CloudCanvas - NeoTec, LLC, Richard Christopher
+ * Written by Richard Christopher, Copyright 2026 NeoTec, LLC
+ *
+ * Minimal Pin Model:
+ * A pure, composable canvas entity containing only:
+ *  1. Traits (composable PinTrait instances)
+ *  2. Contents (Map<string, Object>)
+ *  3. Vectors (Float vectors / PinParticle spatial node)
+ *  4. HTML <div> DOM Element & Hierarchical Scoping
+ *
+ * This file is the model and its public surface. The mechanics live beside it,
+ * as free functions taking the Pin as their first argument:
+ *
+ *   ./pin-element.js   - element structure, DOM membership, measurement
+ *   ./pin-lifecycle.js - activation, focus, lazy provisioning, reconciliation
+ *   ./pin-traits.js    - trait resolution and attach/replace/detach bookkeeping
+ *   ./pin-contents.js  - contents coercion, writes, and the key contract
+ *   ./pin-vectors.js   - vector-list writes and the invalidation they owe
+ *   ./pin-render.js    - the invalidation contract and the synchronous render
+ *   ./pin-edit.js      - the edit lock that defers rendering into a live editor
+ *   ./pin-scope.js     - the parent chain and the events that bubble up it
+ *   ./reload.js        - the pure reload policy those decisions are made from
+ */
+import { particleFromOptions } from '../particles/pin-particle.js';
+import { RELOAD_STRATEGIES, reloadFromOptions } from './reload.js';
+import * as element from './pin-element.js';
+import * as lifecycle from './pin-lifecycle.js';
+import * as traitOps from './pin-traits.js';
+import * as contentOps from './pin-contents.js';
+import * as vectorOps from './pin-vectors.js';
+import * as renderOps from './pin-render.js';
+import * as edit from './pin-edit.js';
+import * as scope from './pin-scope.js';
+
+/**
+ * Structure classes live with the code that builds them; they are re-exported
+ * here so `pin.js` stays the single import site for the Pin model.
+ */
+export { CONTENT_CLASS, PIN_CLASS, SCOPE_CLASS, SELECTABLE_TEXT_CLASS } from './pin-element.js';
+
+/**
+ * Child-layout vocabulary lives with the code that writes it (`./pin-element.js`)
+ * and is re-exported here so `pin.js` stays the single import site for the model.
+ */
+export { LAYOUT_MODES, LAYOUT_CLASS, FLOW_CHILD_CLASS, LAYOUT_GAP_PROPERTY } from './pin-element.js';
+
+/**
+ * Reload policy lives in `./reload.js`; it is re-exported here for the same
+ * reason.
+ */
+export {
+  DORMANT_CLASS,
+  RELOAD_STRATEGIES,
+  RELOAD_MODES,
+  normalizeReloadStrategy,
+  resolveReloadMode
+} from './reload.js';
+
+export class Pin extends EventTarget {
+  constructor(options = {}) {
+    super();
+    this.id = options.id || `pin_${Math.random().toString(36).slice(2, 9)}`;
+
+    // A utility Pin is machinery, not content: it carries traits and a spatial
+    // node but no element, no display, and no interaction, and it is filtered
+    // out of every manager query (see `./manager.js`). The cursor Pin is one.
+    // Known at construction and never afterwards, so it is read-only from here.
+    this.utility = Boolean(options.utility);
+
+    // Opt-in real text selection inside the content node: the stylesheet lifts
+    // `user-select` there and the drag gesture stands down (see
+    // `./pin-element.js` and `../engine/pointer.js`). Also known at
+    // construction, because it is written onto the element at setup.
+    this.selectableText = Boolean(options.selectableText);
+
+    // Whether the card's border is painted. Unlike the two above this is *not* an
+    // invariant - it is one class, so it stays writable (accessor below).
+    this.bordered = options.bordered;
+
+    // Whether the default card chrome is worn at all. Like `bordered` it is one
+    // class on the root, so it is writable too (accessor below). Set through the
+    // setter before the element exists, so this only records the flag; the element
+    // is built with the matching class by `createDefaultElement`, and `setupElement`
+    // re-applies it - the same two-step `bordered` uses.
+    this.chrome = options.chrome;
+
+    // 1. Spatial node & Vector list (float[])
+    this._initParticle(options);
+
+    // 2. Contents: Map of Objects
+    this.contents = new Map();
+    this._initContents(options.contents || options.content);
+
+    // 3. Traits: Composable capability dictionary
+    this.traits = new Map();
+
+    // 4. Hierarchy & Scoping
+    this.parent = null;
+    this.children = new Set();
+
+    // Fixed two-child element structure (built once in `_setupElement`):
+    //   .cloudcanvas-pin > .cloudcanvas-pin-content + .cloudcanvas-pin-scope
+    // Display traits write into `contentElement`; `scopeElement` hosts child Pins
+    // and is never rewritten, so nested Pins survive every content update.
+    this.contentElement = null;
+    this.scopeElement = null;
+
+    // Layout offset of the scope container inside this Pin, cached at measurement
+    // time so `getGlobalBounds` can place descendants without touching the DOM.
+    this._scopeOffset = { x: 0, y: 0 };
+
+    // Live layout origin of THIS Pin inside its parent's scope, cached at
+    // measurement time and read by `getGlobalBounds` in place of the particle x/y
+    // for a flow child - whose particle position the flex/grid flow makes
+    // meaningless (`element.captureFlowOrigin`). Null for a transform-placed Pin,
+    // which is every free child and every root.
+    this._flowOrigin = null;
+
+    // How this Pin arranges its CHILDREN: 'free' (default, every child absolutely
+    // positioned as today) or a flow mode ('row'/'column'/'grid') worn as one
+    // `is-layout-*` class on the scope well below. Set after `children` exists
+    // because the setter re-flags every child on a change; the well is not built
+    // yet, so this only records the flag and `setupElement`'s `syncLayout` writes
+    // the class once it is - the same two-step chrome uses.
+    this._layoutGap = null;
+    this.layout = options.layout;
+    if (options.gap !== undefined) this.layoutGap = options.gap;
+
+    // Conjugate renderer wiring (null until a session attaches this Pin)
+    this._renderer = null;
+    this._manager = null;
+    this._pendingInvalidations = new Set();
+
+    // Edit lock: while it is held, nothing renders into this Pin (`./pin-edit.js`).
+    edit.initEditState(this);
+
+    // 5. Activation & reload strategy
+    lifecycle.initReloadState(this, options, reloadFromOptions(options));
+
+    // 6. HTML <div> Element
+    this.element = options.element || this._createDefaultElement(options);
+    this._setupElement();
+
+    // Attach initial traits
+    this._initTraits(options);
+
+    // Initial render
+    this.render();
+  }
+
+  /** Adopt the supplied spatial node, or build one (`../particles/pin-particle.js`). */
+  _initParticle(options) { this.particle = particleFromOptions(this.id, options); }
+
+  _initContents(contentsInput) { return contentOps.initContents(this, contentsInput); }
+
+  _initTraits(options) { return traitOps.initTraits(this, options); }
+
+  /* ------------------ ELEMENT STRUCTURE ------------------ */
+
+  _createDefaultElement(options) { return element.createDefaultElement(this, options); }
+
+  _setupElement() { return element.setupElement(this); }
+
+  _buildElementStructure() { return element.buildElementStructure(this); }
+
+  /* ------------------ OWNERSHIP ------------------ */
+
+  /**
+   * The session this Pin belongs to, or null when it belongs to none.
+   *
+   * Resolved through the manager rather than stored: registration with a manager
+   * is the single fact that makes a Pin part of a session, so a Pin that was
+   * never registered, was removed, or lives in a headless manager reports the
+   * truth without anyone having to remember to clear a field.
+   *
+   * @returns {CloudCanvasSession|null}
+   */
+  get session() {
+    return (this._manager && this._manager.session) || null;
+  }
+
+  /* ------------------ HIERARCHY & SCOPE API ------------------ */
+
+  /** Add a child Pin into this Pin's internal scope (`./pin-scope.js`). */
+  addChild(childPin) {
+    if (!(childPin instanceof Pin) || childPin === this) return null;
+    return scope.addChild(this, childPin);
+  }
+
+  /** Remove a child Pin from this Pin's internal scope. */
+  removeChild(childPin) { return scope.removeChild(this, childPin); }
+
+  /**
+   * @deprecated since 0.3.0 - iterate `pin.children`, or `Array.from(pin.children)`
+   * for a snapshot. Removed in 0.4.0.
+   */
+  getChildren() { return Array.from(this.children); }
+
+  /**
+   * The persistent scope container for child Pins.
+   * Built once with the rest of the element structure; this only rebuilds it for
+   * Pins whose element appeared after construction.
+   */
+  getOrCreateScopeElement() {
+    if (this.scopeElement) return this.scopeElement;
+    this._buildElementStructure();
+    return this.scopeElement;
+  }
+
+  /** The display-only content container (null in headless mode). */
+  getContentElement() {
+    if (this.contentElement) return this.contentElement;
+    this._buildElementStructure();
+    return this.contentElement;
+  }
+
+  /** Cumulative global bounding box, summed over the ancestor chain. */
+  getGlobalBounds() { return element.globalBoundsOf(this); }
+
+  /* ------------------ ACTIVATION & RELOAD API ------------------ */
+
+  /** Compatibility alias for `reload === 'lazy'`. */
+  get lazy() {
+    return this.reload === RELOAD_STRATEGIES.LAZY;
+  }
+
+  set lazy(value) {
+    this.reload = value ? RELOAD_STRATEGIES.LAZY : RELOAD_STRATEGIES.ACTIVE;
+  }
+
+  /** Wake this Pin and its subtree; provisions a lazy scope's children. */
+  activate(context) { return lifecycle.activate(this, context); }
+
+  /** Sleep this Pin and cascade to its subtree. */
+  deactivate(context) { return lifecycle.deactivate(this, context); }
+
+  /**
+   * Drop everything the lazy provider produced and re-arm it.
+   * @returns {number} how many child subtrees were destroyed
+   */
+  unload() { return lifecycle.unload(this); }
+
+  /** Bring this Pin's DOM membership in line with its reload strategy. */
+  _reconcile() { return lifecycle.reconcile(this); }
+
+  /* ------------------ FOCUS API ------------------ */
+
+  setFocused(focused, session) { return lifecycle.setFocused(this, focused, session); }
+
+  /* ------------------ TRAIT MANAGEMENT API ------------------ */
+
+  _resolveTrait(nameOrTrait, options) { return traitOps.resolveTrait(this, nameOrTrait, options); }
+
+  /**
+   * Attach a trait, by name (built from the registry) or as an instance.
+   * A Pin holds at most one trait per name - use `replaceTrait` to swap one out.
+   *
+   * `pin.traits` is the Map itself, and it is the read surface: `traits.get`,
+   * `traits.has`, and iteration are the native spellings of every lookup this
+   * class used to wrap.
+   */
+  addTrait(nameOrTrait, options) { return traitOps.addTrait(this, nameOrTrait, options); }
+
+  /** Swap a trait for a freshly resolved one of the same name. */
+  replaceTrait(traitOrName, options) { return traitOps.replaceTrait(this, traitOrName, options); }
+
+  removeTrait(traitName) { return traitOps.removeTrait(this, traitName); }
+
+  /** @deprecated since 0.3.0 - use `pin.traits.get(name)`. Removed in 0.4.0. */
+  getTrait(traitName) { return this.traits.get(traitName); }
+
+  /** @deprecated since 0.3.0 - use `pin.traits.has(name)`. Removed in 0.4.0. */
+  hasTrait(traitName) { return this.traits.has(traitName); }
+
+  /** @deprecated since 0.3.0 - use `Array.from(pin.traits.values())`. Removed in 0.4.0. */
+  getTraits() { return Array.from(this.traits.values()); }
+
+  /** The trait responsible for this Pin's display, or the first trait it has. */
+  get displayTrait() { return traitOps.getDisplayTrait(this); }
+
+  /** The trait responsible for this Pin's display, or the first trait it has. */
+  getDisplayTrait() { return traitOps.getDisplayTrait(this); }
+
+  /** Swap the Pin's display trait atomically; a failed swap is rolled back. */
+  setDisplayTrait(traitOrName, options) {
+    return traitOps.setDisplayTrait(this, traitOrName, options);
+  }
+
+  /** @deprecated since 0.3.0 - use {@link Pin#displayTrait}. Removed in 0.4.0. */
+  getType() { return this.getDisplayTrait(); }
+
+  /** @deprecated since 0.3.0 - use {@link Pin#setDisplayTrait}. Removed in 0.4.0. */
+  setType(traitOrName, options) { return this.setDisplayTrait(traitOrName, options); }
+
+  _displayTraits() { return traitOps.displayTraits(this); }
+
+  /* ------------------ CONTENTS MAP API (./pin-contents.js) ------------------ */
+
+  /**
+   * `pin.contents` is the Map itself, and it is the read surface: `contents.get`,
+   * `contents.has`, and iteration need no wrapper. The writes below are not
+   * wrappers - each one owes the renderer a frame, and that is what they are for.
+   */
+  setContent(key, objectOrValue) { return contentOps.setContent(this, key, objectOrValue); }
+
+  /** Merge contents in, enforcing the display trait's `allowedKeys` contract. */
+  setContents(contentsMapOrObject) { return contentOps.setContents(this, contentsMapOrObject); }
+
+  deleteContent(key) { return contentOps.deleteContent(this, key); }
+
+  clearContents() { return contentOps.clearContents(this); }
+
+  /** @deprecated since 0.3.0 - use `pin.contents.get(key)`. Removed in 0.4.0. */
+  getContent(key) { return this.contents.get(key); }
+
+  /** @deprecated since 0.3.0 - use `pin.contents.has(key)`. Removed in 0.4.0. */
+  hasContent(key) { return this.contents.has(key); }
+
+  /** @deprecated since 0.3.0 - use `new Map(pin.contents)`. Removed in 0.4.0. */
+  getAllContents() { return new Map(this.contents); }
+
+  /* ------------------ RENDERER INVALIDATION CONTRACT ------------------ */
+
+  /**
+   * Declare that this Pin needs work on the next frame.
+   *
+   * The public way to say "something changed that you cannot see from here" -
+   * a trait holding external state, a component whose data arrived out of band.
+   * Every content and structure write in the model ends in this call.
+   *
+   * With a renderer attached the request is queued and nothing touches the DOM;
+   * otherwise the Pin renders synchronously and the kind is kept for replay when
+   * a renderer eventually adopts it.
+   *
+   * @param {'content'|'structure'} [kind='content']
+   * @throws {TypeError} on any other kind
+   */
+  invalidate(kind = 'content') { return renderOps.invalidate(this, kind); }
+
+  /** @deprecated since 0.3.0 - use {@link Pin#invalidate}. Removed in 0.4.0. */
+  _invalidate(kind = 'content') { return this.invalidate(kind); }
+
+  /** Invalidation kinds recorded before a renderer existed (replayed at attach). */
+  takePendingInvalidations() { return renderOps.takePendingInvalidations(this); }
+
+  /* ------------------ VECTORS API (./pin-vectors.js) ------------------ */
+
+  addVector(value) { return vectorOps.addVector(this, value); }
+
+  setVectors(vectorList) { return vectorOps.setVectors(this, vectorList); }
+
+  /** Replace one vector; an out-of-range index is a no-op returning null. */
+  setVector(index, value) { return vectorOps.setVector(this, index, value); }
+
+  removeVector(index) { return vectorOps.removeVector(this, index); }
+
+  clearVectors() { return vectorOps.clearVectors(this); }
+
+  /** L2 norm of the vector list; the absolute value of a single vector. */
+  get magnitude() { return this.particle.getMagnitude(); }
+
+  /** Directional gradient: the single vector, or the mean of the list. */
+  get gradient() { return this.particle.getGradient(); }
+
+  /** @deprecated since 0.3.0 - use `pin.particle.getVectors()`. Removed in 0.4.0. */
+  getVectors() { return this.particle.getVectors(); }
+
+  /** @deprecated since 0.3.0 - use `pin.particle.getVector(index)`. Removed in 0.4.0. */
+  getVector(index = 0) { return this.particle.getVector(index); }
+
+  /** @deprecated since 0.3.0 - use `pin.particle.getPrimaryVector()`. Removed in 0.4.0. */
+  getPrimaryVector() { return this.particle.getPrimaryVector(); }
+
+  /** @deprecated since 0.3.0 - use {@link Pin#magnitude}. Removed in 0.4.0. */
+  getMagnitude() { return this.magnitude; }
+
+  /** @deprecated since 0.3.0 - use {@link Pin#gradient}. Removed in 0.4.0. */
+  getGradient() { return this.gradient; }
+
+  /* ------------------ EDIT LOCK (./pin-edit.js) ------------------ */
+
+  /**
+   * Hold rendering off this Pin while its content is being edited in place.
+   *
+   * Idempotent. Renders requested in the meantime are deferred, not dropped:
+   * `endEdit` replays exactly one of them, with whatever the contents finished
+   * as.
+   *
+   * @param {Element|null} [node] the node holding the caret, kept for the caller
+   * @returns {boolean} true when this call took the lock
+   */
+  beginEdit(node = null) { return edit.beginEdit(this, node); }
+
+  /** Release the edit lock and replay the render it deferred, if any. */
+  endEdit() { return edit.endEdit(this); }
+
+  /** Whether an edit is currently holding rendering off this Pin. */
+  get editing() { return this._editing === true; }
+
+  /* ------------------ SPATIAL & STATE API ------------------ */
+
+  /**
+   * Move this Pin in canvas space.
+   *
+   * A method rather than three setters: the three coordinates are written
+   * together, and a Pin that arrives at its destination one axis at a time is a
+   * Pin that rendered somewhere it was never meant to be. Reads are per-axis
+   * (`pin.x`, `pin.y`, `pin.z`), because a read commits to nothing.
+   */
+  setPosition(x, y, z = this.particle.z) {
+    this.particle.setPosition(x, y, z);
+    // Attached Pins get their transform from the renderer's position diff;
+    // unattached ones still write it immediately.
+    if (!this._renderer) this.renderPosition();
+  }
+
+  /** Canvas-space position, as the spatial node holds it. */
+  get x() { return this.particle.x; }
+
+  get y() { return this.particle.y; }
+
+  get z() { return this.particle.z; }
+
+  /** Whether the particle engine leaves this Pin exactly where it was put. */
+  get pinned() { return this.particle.pinned; }
+
+  set pinned(value) { this.particle.pinned = Boolean(value); }
+
+  /** @deprecated since 0.3.0 - use {@link Pin#pinned}. Removed in 0.4.0. */
+  setPinned(pinned) { this.pinned = pinned; }
+
+  /** Selection state, owned by `SelectableTrait`; false without one. */
+  get selected() {
+    const sel = this.traits.get('selectable');
+    return sel ? sel.selected : false;
+  }
+
+  set selected(value) {
+    const sel = this.traits.get('selectable');
+    if (!sel) return;
+    if (value) sel.select(this);
+    else sel.deselect(this);
+  }
+
+  /** @deprecated since 0.3.0 - use {@link Pin#selected}. Removed in 0.4.0. */
+  setSelected(selected) { this.selected = selected; }
+
+  /** Drag state, owned by `DraggableTrait`; false without one. */
+  get dragging() {
+    const drag = this.traits.get('draggable');
+    return drag ? drag.dragging : false;
+  }
+
+  set dragging(value) {
+    const drag = this.traits.get('draggable');
+    if (!drag) return;
+    drag.dragging = Boolean(value);
+    if (this.element && this.element.classList) {
+      this.element.classList.toggle('is-dragging', drag.dragging);
+    }
+  }
+
+  /** @deprecated since 0.3.0 - use {@link Pin#dragging}. Removed in 0.4.0. */
+  setDragging(dragging) { this.dragging = dragging; }
+
+  /**
+   * Whether the card's border is painted. Default true, and independent of
+   * `chrome`: that takes the whole card away, this leaves surface, padding and
+   * shadow where they were and stops only the border (`./pin-element.js`).
+   */
+  get bordered() { return this._bordered !== false; }
+
+  set bordered(value) { element.setBordered(this, value); }
+
+  /**
+   * Whether this Pin wears the default card chrome: the surface, padding, radius,
+   * border and shadow. Default true. `chrome: false` is what a component drawing
+   * its own surface asks for - `contentElement` becomes the Pin's own boundary,
+   * with no card around it.
+   *
+   * Structurally one class on the root, exactly like `bordered` - toggling it
+   * never touches `contentElement` or its children (the two-child structure is
+   * fixed and built once). It differs from `bordered` in one way only: chrome
+   * carries real geometry (padding, border width, shadow), so the setter re-measures
+   * through `invalidate('content')` where `bordered` - a transparent border that
+   * moves nothing - does not (`./pin-element.js`).
+   */
+  get chrome() { return this._chrome !== false; }
+
+  set chrome(value) { element.setChrome(this, value); }
+
+  /**
+   * How this Pin arranges its CHILDREN: `'free'` (default - every child absolutely
+   * positioned by its own transform, unchanged), or `'row'` / `'column'` / `'grid'`,
+   * which lay the scope well out with flex or grid so the children flow.
+   *
+   * Structurally the twin of `chrome`: one class, live-settable - but on the scope
+   * well rather than the root, because it is about how the children sit, not how
+   * this Pin does. Switching a container to a flow mode makes every existing child
+   * a flow child (`position: relative`, no transform); switching back to `'free'`
+   * restores absolute positioning (`./pin-element.js`). An unknown value throws.
+   */
+  get layout() { return this._layout || 'free'; }
+
+  set layout(value) { element.setLayout(this, value); }
+
+  /**
+   * Gap between children in a non-`free` layout, in pixels, written as the
+   * `--cc-layout-gap` custom property all three flow modes read. Null (the
+   * default) leaves the stylesheet's own spacing token in place.
+   */
+  get layoutGap() { return this._layoutGap; }
+
+  set layoutGap(value) { element.setLayoutGap(this, value); }
+
+  /** Request a layout measurement (batched when a renderer is attached). */
+  syncDimensions() { return element.syncDimensions(this); }
+
+  /** Read this Pin's layout box straight from the DOM (read phase only). */
+  measureLayout() { return element.measureLayout(this); }
+
+  mount(parentContainer) { return element.mountInto(this, parentContainer); }
+
+  unmount() { return element.unmountElement(this); }
+
+  /* ------------------ TICK & RENDERING HOOKS ------------------ */
+
+  /** Execute trait tick lifecycle hooks, then tick the subtree. */
+  tick(dt = 1, context = {}) { return renderOps.tick(this, dt, context); }
+
+  /** Render spatial transform */
+  renderPosition() { return element.writeTransform(this); }
+
+  /** Run every trait's `onRender` hook against the display-only content element. */
+  renderContent(context = {}) { return renderOps.renderContent(this, context); }
+
+  /** Full synchronous render: contents, measurement, transform, and children. */
+  render(context = {}) { return renderOps.render(this, context); }
+
+  /* ------------------ EVENT TRANSMISSION ------------------ */
+
+  _normalizeTransmitEvent(event) { return scope.normalizeTransmitEvent(this, event); }
+
+  /**
+   * Transmit an event through this Pin and up its scope chain.
+   * Returns every trait `onTransmit` result collected along the walk.
+   */
+  transmit(event, context = {}) { return scope.transmit(this, event, context); }
+
+  /* ------------------ BREADCRUMB / SCOPE ACCESS ------------------ */
+
+  /** Parent chain, nearest first: [parent, grandparent, ... root]. */
+  ancestors() { return scope.ancestorsOf(this); }
+
+  /** Root-first trail ending at this pin: [root, ... parent, this]. */
+  breadcrumb() {
+    return [...this.ancestors().reverse(), this];
+  }
+
+  /** Nearest ancestor's trait instance (never this pin's own), or null. */
+  scopeTrait(name) { return scope.scopeTrait(this, name); }
+
+  /** Read a value off the nearest ancestor trait that defines it. */
+  deriveFromScope(traitName, key) { return scope.deriveFromScope(this, traitName, key); }
+
+  /** Tear this Pin down, subtree and all (`./pin-lifecycle.js`). */
+  destroy() { lifecycle.destroy(this); }
+}

@@ -27,6 +27,25 @@
  * child arrives, which keeps the graph an acyclic forest and its render order
  * top-down.
  *
+ * THREE DECORATION SEAMS, all opt-in on the command definition and all defaulting
+ * to the behaviour that predates them, so an item that declares none renders and
+ * runs exactly as before. Each replaces a way a consumer had to reach *around*
+ * this module - a `MutationObserver`, a capture-phase `stopPropagation`, a
+ * synthetic hover click - because the seam did not exist:
+ *
+ *   - `renderItem(button, item, context)` runs the instant the bundle has built a
+ *     command's `<button>` (class, role, `data-menu-item`, label, and a trigger's
+ *     caret already on it). The caller decorates it in place - a hint, a tick, a
+ *     swatch - or returns a replacement element. It is the built-in alternative to
+ *     watching the overlay for buttons to appear and decorating them after the
+ *     fact.
+ *   - `closeOnRun: false` on a leaf keeps the menu open after its action runs, for
+ *     an in-place toggle. The alternative was pre-empting the bundle's own click
+ *     with a capture-phase listener that ran the action and stopped the close.
+ *   - `openOnHover: true` on a trigger opens its flyout when the pointer rests on
+ *     it, the same as a click. The alternative was dispatching a synthetic click
+ *     at the trigger on a hover timer.
+ *
  * Plain DOM, core tokens, no `lib/` import: the menu is core code, and the
  * dependency edge only ever runs core -> nothing.
  *
@@ -56,6 +75,13 @@ export const MENU_ITEM_SUBMENU_CLASS = 'cloudcanvas-context-menu-item--submenu';
 
 /** Attribute carrying an item's id from the DOM back to its definition. */
 export const MENU_ITEM_ATTR = 'data-menu-item';
+
+/**
+ * How long the pointer rests on an `openOnHover` trigger before its flyout opens.
+ * A short delay, so a pointer merely crossing a trigger on its way elsewhere does
+ * not open panels it never meant to.
+ */
+export const MENU_HOVER_OPEN_MS = 180;
 
 /* ------------------ Z-ORDER (the DOM is the model) ------------------ */
 
@@ -155,6 +181,16 @@ const ALWAYS = () => true;
  *           visibility, decided per opening
  * @property {((session: CloudCanvasSession, context: MenuContext) => any)|null} action
  *           run on click, before the menu closes; null for a submenu trigger
+ * @property {((button: Element, item: MenuItem, context: MenuContext) => (Element|void))|null} renderItem
+ *           called once the item's `<button>` is built, to decorate it in place
+ *           or return a replacement element (which must carry `MENU_ITEM_ATTR` to
+ *           stay clickable); null for the default rendering
+ * @property {boolean} closeOnRun whether running the action closes the menu
+ *           (default true); false keeps it open for an in-place toggle. Ignored
+ *           for a submenu trigger, which has no action
+ * @property {boolean} openOnHover whether resting the pointer on this trigger
+ *           opens its flyout (default false); ignored for a leaf, which has no
+ *           flyout
  *
  * @typedef {{pin: Pin|null, x: number, y: number}} MenuContext
  *          `pin` is null when the click landed on empty canvas; `x`/`y` are
@@ -194,6 +230,9 @@ export class MenuRegistry {
     if (action !== undefined && typeof action !== 'function') {
       throw new Error(`MenuRegistry.register: "${id}" action, if given, must be a function`);
     }
+    if (item.renderItem !== undefined && typeof item.renderItem !== 'function') {
+      throw new Error(`MenuRegistry.register: "${id}" renderItem, if given, must be a function`);
+    }
     if (this._items.has(id)) {
       throw new Error(`MenuRegistry.register: "${id}" is already registered`);
     }
@@ -205,7 +244,11 @@ export class MenuRegistry {
       group: typeof item.group === 'string' ? item.group : '',
       parent,
       when: typeof item.when === 'function' ? item.when : ALWAYS,
-      action: typeof action === 'function' ? action : null
+      action: typeof action === 'function' ? action : null,
+      // The three opt-in seams, normalized once so every read is a plain field.
+      renderItem: typeof item.renderItem === 'function' ? item.renderItem : null,
+      closeOnRun: item.closeOnRun !== false,
+      openOnHover: Boolean(item.openOnHover)
     });
     this._items.set(id, definition);
     return definition;
@@ -382,12 +425,21 @@ export function mountContextMenu(session) {
     items: new Map(),
     /** @type {PanelRecord[]} the open chain: [0] is the root, then each flyout */
     panels: [],
+    /** Pending `openOnHover` timer, or null; at most one is ever armed. */
+    hoverTimer: null,
     onClick: (event) => runClickedItem(session, event),
+    onPointerOver: (event) => onMenuPointerOver(session, event),
+    onPointerOut: (event) => onMenuPointerOut(session, event),
     onDocumentPointerDown: (event) => dismissOnOutside(session, event),
     onDocumentKeyDown: (event) => onMenuKeyDown(session, event)
   };
 
   element.addEventListener('click', state.onClick);
+  // Hover-to-open rides the same delegation as click: one listener on the panel,
+  // resolved to the item by `MENU_ITEM_ATTR`. A panel with no `openOnHover`
+  // trigger under the pointer arms nothing, so this is inert until opted in.
+  element.addEventListener('pointerover', state.onPointerOver);
+  element.addEventListener('pointerout', state.onPointerOut);
   overlay.appendChild(element);
   session._contextMenu = state;
   return element;
@@ -400,6 +452,8 @@ export function unmountContextMenu(session) {
 
   closeContextMenu(session);
   state.element.removeEventListener('click', state.onClick);
+  state.element.removeEventListener('pointerover', state.onPointerOver);
+  state.element.removeEventListener('pointerout', state.onPointerOut);
   if (state.element.parentNode) state.element.parentNode.removeChild(state.element);
   session._contextMenu = null;
   return true;
@@ -429,7 +483,7 @@ export function openContextMenu(session, context) {
   // stacks a second copy of a listener.
   closeContextMenu(session);
 
-  const ids = renderInto(state.element, items, state);
+  const ids = renderInto(state.element, items, state, context);
   state.panels = [rootPanel(state.element, ids)];
   // Unhidden before it is positioned: `placeInHost` clamps the menu inside the
   // host box, and the clamp needs a real measurement to do it. A hidden element
@@ -459,6 +513,7 @@ export function closeContextMenu(session) {
   // focus to the document body, and by then there is nothing left to ask.
   const held = menuHoldsFocus(state);
 
+  clearHoverTimer(state);
   closePanelsDeeperThan(session, 0);
   state.element.hidden = true;
   state.element.textContent = '';
@@ -538,9 +593,11 @@ function openFlyout(session, triggerItem, triggerButton) {
   panel.className = `${MENU_CLASS} ${MENU_FLYOUT_CLASS}`;
   panel.setAttribute('role', 'menu');
   panel.addEventListener('click', state.onClick);
+  panel.addEventListener('pointerover', state.onPointerOver);
+  panel.addEventListener('pointerout', state.onPointerOut);
   session.overlayElement.appendChild(panel);
 
-  const ids = renderInto(panel, children, state);
+  const ids = renderInto(panel, children, state, state.context);
   // Beside the trigger, top-aligned with it: `placeInHost` opens it on the side
   // its parent took (so a flipped chain stays flipped), flips to the other side
   // when that would overflow the host, and reports the side it settled on.
@@ -580,6 +637,8 @@ function closePanelsDeeperThan(session, depth) {
     if (panel.triggerButton) panel.triggerButton.setAttribute('aria-expanded', 'false');
     if (panel.element !== state.element) {
       panel.element.removeEventListener('click', state.onClick);
+      panel.element.removeEventListener('pointerover', state.onPointerOver);
+      panel.element.removeEventListener('pointerout', state.onPointerOut);
       if (panel.element.parentNode) panel.element.parentNode.removeChild(panel.element);
     }
     closed += 1;
@@ -610,10 +669,11 @@ function closeInnermostFlyout(session) {
  * Fill a panel with one `<button>` per item and one `<div>` per group, register
  * each item into the on-screen map, and report the ids so the panel can be torn
  * down later. Shared by the root and every flyout - the only difference between
- * them is which items they are handed.
+ * them is which items they are handed. `context` is the opening's `MenuContext`,
+ * passed through to each item's `renderItem` seam.
  * @returns {string[]} the ids rendered, in order
  */
-function renderInto(containerElement, items, state) {
+function renderInto(containerElement, items, state, context) {
   const doc = containerElement.ownerDocument;
   containerElement.textContent = '';
   const ids = [];
@@ -623,7 +683,7 @@ function renderInto(containerElement, items, state) {
     wrapper.className = MENU_GROUP_CLASS;
 
     for (const item of group) {
-      wrapper.appendChild(itemButton(doc, item));
+      wrapper.appendChild(itemButton(doc, item, context));
       state.items.set(item.id, item);
       ids.push(item.id);
     }
@@ -632,8 +692,16 @@ function renderInto(containerElement, items, state) {
   return ids;
 }
 
-/** A real button: focusable, Enter- and Space-activated, announced as a command. */
-function itemButton(doc, item) {
+/**
+ * A real button: focusable, Enter- and Space-activated, announced as a command.
+ *
+ * The `renderItem` seam runs last, once the button is fully built (a trigger's
+ * caret included): the caller mutates it in place, or returns a replacement
+ * element to use instead. A returned element is used as-is - it is the caller's
+ * to stamp with `MENU_ITEM_ATTR` if it must stay clickable - and anything else
+ * (including the button itself, or nothing) keeps the built button.
+ */
+function itemButton(doc, item, context) {
   const button = doc.createElement('button');
   button.type = 'button';
   button.className = MENU_ITEM_CLASS;
@@ -641,6 +709,11 @@ function itemButton(doc, item) {
   button.setAttribute(MENU_ITEM_ATTR, item.id);
   button.textContent = item.label;
   if (isSubmenuTrigger(item)) decorateTrigger(button);
+
+  if (typeof item.renderItem === 'function') {
+    const replacement = item.renderItem(button, item, context);
+    if (replacement && replacement !== button && replacement.nodeType === 1) return replacement;
+  }
   return button;
 }
 
@@ -827,6 +900,11 @@ function restoreFocus(session) {
  * its action and the whole chain closes - in that order, so an action may reopen
  * the menu. A trigger never runs an action: it has none, and even a stray one
  * would be ignored here.
+ *
+ * `closeOnRun: false` is the one exception to "a leaf closes the menu": the
+ * action runs and the chain is left up, for a toggle that flips in place. This is
+ * the click *and* the keyboard path - Enter and Space on a `<button>` dispatch a
+ * native click that lands here - so a toggle keeps the menu open however it ran.
  */
 function runClickedItem(session, event) {
   const state = session._contextMenu;
@@ -842,8 +920,60 @@ function runClickedItem(session, event) {
   if (typeof item.action !== 'function') return false;
 
   item.action(session, state.context);
-  closeContextMenu(session);
+  if (item.closeOnRun) closeContextMenu(session);
   return true;
+}
+
+/* ------------------ HOVER-TO-OPEN (openOnHover triggers) ------------------ */
+
+/**
+ * Arm the flyout of an `openOnHover` trigger the pointer has come to rest on.
+ *
+ * At most one timer is ever armed: a fresh pointerover clears the pending one, so
+ * moving the pointer across several items opens only the last it settled on, and
+ * a trigger already expanded arms nothing. The open is deferred by
+ * {@link MENU_HOVER_OPEN_MS} and re-checks the trigger is still there and still
+ * closed when it fires, because the pointer may have left in the meantime.
+ */
+function onMenuPointerOver(session, event) {
+  const state = session ? session._contextMenu : null;
+  if (!state || state.element.hidden) return;
+
+  clearHoverTimer(state);
+  const target = event ? event.target : null;
+  const button = target && typeof target.closest === 'function'
+    ? target.closest(`[${MENU_ITEM_ATTR}]`)
+    : null;
+  if (!button) return;
+
+  const item = state.items.get(button.getAttribute(MENU_ITEM_ATTR));
+  if (!item || !item.openOnHover || !isSubmenuTrigger(item)) return;
+  if (button.getAttribute('aria-expanded') === 'true') return;
+
+  state.hoverTimer = setTimeout(() => {
+    state.hoverTimer = null;
+    if (!button.isConnected || button.getAttribute('aria-expanded') === 'true') return;
+    openFlyout(session, item, button);
+  }, MENU_HOVER_OPEN_MS);
+}
+
+/** A pointer leaving a menu item disarms a pending hover-open. */
+function onMenuPointerOut(session, event) {
+  const state = session ? session._contextMenu : null;
+  if (!state) return;
+
+  const target = event ? event.target : null;
+  const onItem = target && typeof target.closest === 'function'
+    && target.closest(`[${MENU_ITEM_ATTR}]`);
+  if (onItem) clearHoverTimer(state);
+}
+
+/** Cancel a pending hover-open, if any. */
+function clearHoverTimer(state) {
+  if (state && state.hoverTimer !== null) {
+    clearTimeout(state.hoverTimer);
+    state.hoverTimer = null;
+  }
 }
 
 /** A press outside every open panel closes the menu, and is otherwise left alone. */

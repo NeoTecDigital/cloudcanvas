@@ -22,10 +22,33 @@
  *   container        Element or selector to mount into; omit to mount later.
  *   customCSS        Per-session author CSS, removed again by `destroy()`.
  *   defaultReload    Default reload strategy for every Pin.
+ *   frameOnFocus     `false` stops `focus()` from moving the camera to frame the
+ *                    Pin it focuses (`../engine/navigation.js`); the promotion and
+ *                    the focus presentation still happen, only the `zoomToFit` is
+ *                    withheld. For a session where the camera is a fixed viewport -
+ *                    a menu, a list - so a focused item never scrolls into frame.
  *   label            Accessible name for the host element.
  *   loadChildren     Session-level lazy child provider.
  *   offloadMargin    Screen-pixel clearance before an `offload` Pin is detached.
+ *   pan              `false` stops a press on bare canvas from panning the camera
+ *                    (`../engine/pointer.js`); the press is otherwise left alone,
+ *                    so a click, a caret placement or a chrome focus still lands.
+ *                    For a session whose background is chrome rather than a
+ *                    draggable plane.
+ *   tabStop          `false` keeps the host from becoming the canvas's single tab
+ *                    stop (`../engine/keyboard.js` no longer writes `tabindex="0"`).
+ *                    For a session embedded in a page whose own controls own the
+ *                    tab order; keyboard control still works once the host is
+ *                    focused by other means, and an author-set `tabindex` is
+ *                    untouched either way.
  *   viewport         Initial camera (`{x, y, scale, minScale, maxScale}`).
+ *
+ * Every option added here defaults to the behaviour that predates it, so
+ * importing the core changes nothing until a consumer opts in. `pan`,
+ * `frameOnFocus` and `tabStop` each replace a documented workaround a consumer
+ * (Graphiti's menunav) reached for because the core offered no seam: a
+ * capture-phase `stopImmediatePropagation` on the background press, a
+ * `viewport.reset()` on every `focus:changed`, and a `tabindex="-1"` write.
  *
  * @type {readonly string[]}
  */
@@ -34,9 +57,12 @@ export const SESSION_OPTION_KEYS = Object.freeze([
   'container',
   'customCSS',
   'defaultReload',
+  'frameOnFocus',
   'label',
   'loadChildren',
   'offloadMargin',
+  'pan',
+  'tabStop',
   'viewport'
 ]);
 

@@ -130,6 +130,12 @@ export function onPointerDown(session, event) {
 
   const pin = pinForEvent(session, event);
   if (!pin) {
+    // `pan: false` - the background is chrome, not a draggable plane. The press
+    // is left alone (no capture is taken, since `isGestureActive` stays false
+    // with nothing panning), so the browser's own focus/caret/click still lands.
+    // This is the seam that replaces a consumer stopping the press at capture
+    // phase to keep the camera from moving under a menu.
+    if (session.options && session.options.pan === false) return null;
     session.isPanning = true;
     session.lastPointer = { x: event.clientX, y: event.clientY };
     return null;

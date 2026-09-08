@@ -115,6 +115,16 @@ export const GRAB_HANDLE_CLASS = 'cloudcanvas-grab-handle';
  * `ResizableTrait`'s handles exactly: a direct child of the root (so it rides the
  * Pin's transform and a content re-render never removes it), shown through the
  * `hidden` property, and driven off the one `select` signal rather than a poll.
+ *
+ * Options:
+ *   - `reparentOnDrop` (default `true`) - whether a drop whose release point
+ *     lands inside another Pin's scope *re-parents* the Pin into it (and, in a
+ *     flow container, re-orders it). `false` makes a drop purely positional: the
+ *     Pin stays exactly where it was let go and keeps its parent, so nesting is
+ *     never an accident of where a drag happened to end. For a graph whose edges
+ *     are the only structure and where a node dropped on a node must not become
+ *     its child - the seam that replaces a consumer committing the reparent and
+ *     then reversing it on the next frame.
  */
 export class DraggableTrait extends PinTrait {
   constructor(options = {}) {
@@ -124,6 +134,11 @@ export class DraggableTrait extends PinTrait {
     });
     this.dragging = false;
     this.dragOffset = { x: 0, y: 0 };
+
+    // Whether a drop that lands in another scope reparents (and reorders in a
+    // flow container), or is purely positional. Default true is the historical
+    // behaviour; `false` is the graph-node opt-out (see the class header).
+    this.reparentOnDrop = options.reparentOnDrop !== false;
 
     // Where the press landed, and whether it has since travelled far enough to
     // be a drag rather than a click. Both are cleared on every pointer up.
@@ -310,10 +325,15 @@ export class DraggableTrait extends PinTrait {
    * One case intercepts the regression lock: a drop back inside a *flow* container
    * the Pin already belongs to is a reorder, not a no-op. See {@link _resolveReorder}.
    *
+   * `reparentOnDrop: false` short-circuits the whole resolution: the Pin keeps
+   * the parent and order it had, and the last `onPointerMove` is left as the only
+   * effect of the drop - it moved, it did not nest.
+   *
    * @returns {boolean} whether the Pin was reparented or reordered
    */
   _resolveDrop(pin, event, session) {
     if (event === undefined || !session) return false;
+    if (!this.reparentOnDrop) return false;
 
     const target = droppablePinAt(session, event, { ignore: pin });
 

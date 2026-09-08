@@ -105,6 +105,13 @@ const KEY_OWNING_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'OPTION', 'BUTTO
  * placed later in the tab order, or deliberately removed from it, is a decision
  * this module has no business overruling.
  *
+ * `tabStop: false` opts out of making the host the canvas's single tab stop:
+ * the `tabindex="0"` is simply never written, so a host embedded in a page whose
+ * own controls own the tab order stays out of it (a `<div>` with no `tabindex`
+ * is not tabbable). The keydown listener is still bound, so camera control works
+ * the moment the host is focused by any other means. This is the seam that
+ * replaces a consumer overwriting the host's `tabindex` with `-1` after the fact.
+ *
  * @returns {boolean} true when a listener was registered
  */
 export function bindKeyboard(session) {
@@ -112,7 +119,9 @@ export function bindKeyboard(session) {
   if (!host || typeof host.addEventListener !== 'function') return false;
   if (session._keyboard) unbindKeyboard(session);
 
-  const tabindexAdded = typeof host.hasAttribute === 'function'
+  const tabStop = !(session.options && session.options.tabStop === false);
+  const tabindexAdded = tabStop
+    && typeof host.hasAttribute === 'function'
     && !host.hasAttribute('tabindex');
   if (tabindexAdded) host.setAttribute('tabindex', '0');
 

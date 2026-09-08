@@ -118,4 +118,24 @@ export class DisplayTrait extends PinTrait {
       ? `${base}+html`
       : base;
   }
+
+  /**
+   * Throw away the built subtree so the next render rebuilds it from scratch.
+   *
+   * The rebuild in `_ensureBuilt` fires on a *signature* change - a type swap or
+   * the html override appearing - because those are the only structure changes the
+   * built-in templates have: a card is always title-over-body, whatever the values.
+   * A `defineComponent` template whose `build` reads the content *shape* (the
+   * slotted type builds one region per slot, one line per field) has a fourth kind
+   * of change the signature cannot see, since the trait name it keys on is fixed.
+   * This is the deliberate escape hatch for exactly that: after rewriting such a
+   * Pin's contents to a different shape, discarding the build is what makes the
+   * next frame lay out the new regions instead of writing into the old ones.
+   *
+   * Owned here rather than reached at from outside because `pin._display` is this
+   * trait's private render state; `Pin.rebuildDisplay` is the public spelling.
+   */
+  discardBuild(pin) {
+    if (pin && pin._display) pin._display = null;
+  }
 }

@@ -366,6 +366,23 @@ export class Pin extends EventTarget {
   /** Invalidation kinds recorded before a renderer existed (replayed at attach). */
   takePendingInvalidations() { return renderOps.takePendingInvalidations(this); }
 
+  /**
+   * Force this Pin's display to rebuild its subtree on the next render.
+   *
+   * The ordinary render path rebuilds only on a display-type swap or the `html`
+   * override toggling (`./traits/display.js`), because those are the only shape
+   * changes a built-in template has. A component whose `build` reads the content
+   * *shape* - the slotted custom type lays out one region per slot - has no such
+   * signal, so after its contents change shape a plain `setContents` would write
+   * into a subtree built for the old shape. This discards that built subtree and
+   * asks for a content frame, so the next render lays the new shape out.
+   */
+  rebuildDisplay() {
+    const trait = this.getDisplayTrait();
+    if (trait && typeof trait.discardBuild === 'function') trait.discardBuild(this);
+    return this.invalidate('content');
+  }
+
   /* ------------------ VECTORS API (./pin-vectors.js) ------------------ */
 
   addVector(value) { return vectorOps.addVector(this, value); }

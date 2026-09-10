@@ -15,6 +15,19 @@ records the migration surface, not the commit history.
 
 ### Added
 
+- **`Pin.rebuildDisplay()` - force a display to lay out a new content *shape*.** The ordinary
+  render path rebuilds a Pin's subtree only on a display-type swap or the `html` override
+  toggling, because those are the only structure changes a built-in template has: a card is
+  always title-over-body, whatever the values. A `defineComponent` template whose `build`
+  reads the content *shape* - the slotted custom type lays out one region per slot - has a
+  fourth kind of change the display signature (its fixed trait name) cannot see, so after its
+  contents change shape a plain `setContents` writes into a subtree built for the old shape.
+  `rebuildDisplay()` discards the built subtree and asks for a content frame, so the next
+  render constructs the new shape. It is a no-op on a Pin with no display trait and safe to
+  call repeatedly. The trait-level primitive it drives, `DisplayTrait.discardBuild(pin)`, is
+  public too - `rebuildDisplay` is the Pin-level spelling.
+  *Migration*: none - additive; a Pin never rebuilt implicitly still renders identically.
+
 - **`pin.layout` and `pin.layoutGap` - a container that lays its children out.** A Pin
   option and a live get/set pair: `'free'` (the default, and what every existing Pin is)
   keeps today's absolute positioning, where each child is placed by its own transform;

@@ -25,6 +25,7 @@ var CloudCanvas = (() => {
   // index.js
   var index_exports = {};
   __export(index_exports, {
+    ActionRegistry: () => ActionRegistry,
     BEVEL_PRESETS: () => BEVEL_PRESETS,
     CANVAS_DEFAULT_CSS: () => CANVAS_DEFAULT_CSS,
     CHILDREN_ERROR_EVENT: () => CHILDREN_ERROR_EVENT,
@@ -75,6 +76,7 @@ var CloudCanvas = (() => {
     MenuRegistry: () => MenuRegistry,
     PAN_SHIFT_MULTIPLIER: () => PAN_SHIFT_MULTIPLIER,
     PAN_STEP_PX: () => PAN_STEP_PX,
+    PARAM_CONTROLS: () => PARAM_CONTROLS,
     PIN_SIGNAL_TYPES: () => PIN_SIGNAL_TYPES,
     PRESERVE_TYPE: () => PRESERVE_TYPE,
     ParticleEngine: () => ParticleEngine,
@@ -90,6 +92,8 @@ var CloudCanvas = (() => {
     RESIZE_DIRECTIONS: () => RESIZE_DIRECTIONS,
     RESIZE_HANDLE_ATTR: () => RESIZE_HANDLE_ATTR,
     RESIZE_HANDLE_CLASS: () => RESIZE_HANDLE_CLASS,
+    ReactionRunner: () => ReactionRunner,
+    ReactionStore: () => ReactionStore,
     ResizableTrait: () => ResizableTrait,
     SCROLL_REGION_SELECTOR: () => SCROLL_REGION_SELECTOR,
     STYLE_PROPERTIES: () => STYLE_PROPERTIES,
@@ -106,11 +110,13 @@ var CloudCanvas = (() => {
     TransmitterTrait: () => TransmitterTrait,
     Viewport: () => Viewport,
     ZOOM_STEP: () => ZOOM_STEP,
+    actionRegistry: () => actionRegistry,
     adopt: () => adopt,
     announce: () => announce,
     applyHostAria: () => applyHostAria,
     applyPinStyleMap: () => applyPinStyleMap,
     applyTheme: () => applyTheme,
+    attachReactions: () => attachReactions,
     bindKeyboard: () => bindKeyboard,
     bringToFront: () => bringToFront,
     checkStyleDiscipline: () => checkStyleDiscipline,
@@ -122,6 +128,7 @@ var CloudCanvas = (() => {
     createCursorLayer: () => createCursorLayer,
     createCursorPin: () => createCursorPin,
     defineComponent: () => defineComponent,
+    detachReactions: () => detachReactions,
     droppablePinAt: () => droppablePinAt,
     emitPinSignal: () => emitPinSignal,
     ensureVisible: () => ensureVisible,
@@ -145,8 +152,10 @@ var CloudCanvas = (() => {
     place: () => place,
     prefersReducedMotion: () => prefersReducedMotion,
     primitives: () => primitives_exports,
+    reactionsFor: () => reactionsFor,
     readingOrder: () => readingOrder,
     reconcileKeyedList: () => reconcileKeyedList,
+    registerBuiltinActions: () => registerBuiltinActions,
     registerCursorTraits: () => registerCursorTraits,
     registerMenuItem: () => registerMenuItem,
     relativeLuminance: () => relativeLuminance,
@@ -3076,6 +3085,25 @@ var CloudCanvas = (() => {
       const base = this.customTemplate ? `custom:${this.name}` : this.displayType;
       return usesHtmlOverride(this.displayType, contents) && !this.customTemplate ? `${base}+html` : base;
     }
+    /**
+     * Throw away the built subtree so the next render rebuilds it from scratch.
+     *
+     * The rebuild in `_ensureBuilt` fires on a *signature* change - a type swap or
+     * the html override appearing - because those are the only structure changes the
+     * built-in templates have: a card is always title-over-body, whatever the values.
+     * A `defineComponent` template whose `build` reads the content *shape* (the
+     * slotted type builds one region per slot, one line per field) has a fourth kind
+     * of change the signature cannot see, since the trait name it keys on is fixed.
+     * This is the deliberate escape hatch for exactly that: after rewriting such a
+     * Pin's contents to a different shape, discarding the build is what makes the
+     * next frame lay out the new regions instead of writing into the old ones.
+     *
+     * Owned here rather than reached at from outside because `pin._display` is this
+     * trait's private render state; `Pin.rebuildDisplay` is the public spelling.
+     */
+    discardBuild(pin) {
+      if (pin && pin._display) pin._display = null;
+    }
   };
 
   // pins/reparent.js
@@ -5193,6 +5221,22 @@ var CloudCanvas = (() => {
     /** Invalidation kinds recorded before a renderer existed (replayed at attach). */
     takePendingInvalidations() {
       return takePendingInvalidations(this);
+    }
+    /**
+     * Force this Pin's display to rebuild its subtree on the next render.
+     *
+     * The ordinary render path rebuilds only on a display-type swap or the `html`
+     * override toggling (`./traits/display.js`), because those are the only shape
+     * changes a built-in template has. A component whose `build` reads the content
+     * *shape* - the slotted custom type lays out one region per slot - has no such
+     * signal, so after its contents change shape a plain `setContents` would write
+     * into a subtree built for the old shape. This discards that built subtree and
+     * asks for a content frame, so the next render lays the new shape out.
+     */
+    rebuildDisplay() {
+      const trait = this.getDisplayTrait();
+      if (trait && typeof trait.discardBuild === "function") trait.discardBuild(this);
+      return this.invalidate("content");
     }
     /* ------------------ VECTORS API (./pin-vectors.js) ------------------ */
     addVector(value) {
@@ -9250,6 +9294,411 @@ var CloudCanvas = (() => {
       this._sessionStyleEl = null;
     }
   };
+
+  // pins/reaction-actions.js
+  var PARAM_CONTROLS = Object.freeze(["text", "number", "checkbox", "select"]);
+  function coerceParam(descriptor, raw) {
+    if (descriptor.control === "number") {
+      const number = Number(raw);
+      if (!Number.isFinite(number)) return { error: `"${descriptor.key}" must be a number` };
+      return { value: number };
+    }
+    if (descriptor.control === "checkbox") return { value: Boolean(raw) };
+    if (descriptor.control === "select") {
+      const value = raw === void 0 || raw === null ? "" : String(raw);
+      const allowed = descriptor.options.some((option) => option.value === value);
+      if (!allowed) return { error: `"${descriptor.key}" is not one of the offered values` };
+      return { value };
+    }
+    return { value: raw === void 0 || raw === null ? "" : String(raw) };
+  }
+  function isRequired(descriptor) {
+    return descriptor.required !== false;
+  }
+  function validateParams(definition, raw) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    const params = {};
+    for (const descriptor of definition.params) {
+      const has = Object.prototype.hasOwnProperty.call(source, descriptor.key);
+      if (!has) {
+        if (isRequired(descriptor)) return { valid: false, error: `missing parameter "${descriptor.key}"` };
+        continue;
+      }
+      const coerced = coerceParam(descriptor, source[descriptor.key]);
+      if (coerced.error) return { valid: false, error: coerced.error };
+      params[descriptor.key] = coerced.value;
+    }
+    return { valid: true, params };
+  }
+  function normalizeDescriptor(descriptor, type) {
+    const key = descriptor && typeof descriptor.key === "string" ? descriptor.key : "";
+    if (key === "") throw new Error(`ActionRegistry: action "${type}" has a parameter with no key`);
+    if (!PARAM_CONTROLS.includes(descriptor.control)) {
+      throw new Error(`ActionRegistry: parameter "${key}" of "${type}" has an unknown control`);
+    }
+    if (descriptor.control === "select" && !Array.isArray(descriptor.options)) {
+      throw new Error(`ActionRegistry: select parameter "${key}" of "${type}" needs options`);
+    }
+    return Object.freeze({
+      key,
+      label: descriptor.label || key,
+      control: descriptor.control,
+      required: descriptor.required !== false,
+      options: descriptor.control === "select" ? Object.freeze([...descriptor.options]) : null,
+      placeholder: descriptor.placeholder || ""
+    });
+  }
+  var ActionRegistry = class {
+    constructor() {
+      this._definitions = /* @__PURE__ */ new Map();
+    }
+    /**
+     * Register an action definition. Names are unique - re-registering throws, so a
+     * page cannot silently shadow `set-style` with its own.
+     *
+     * @param {string} type
+     * @param {{label?: string, params?: object[], run: Function}} definition
+     * @returns {object} the frozen, normalized definition
+     */
+    register(type, definition) {
+      if (typeof type !== "string" || type.length === 0) {
+        throw new Error("ActionRegistry.register: type must be a non-empty string");
+      }
+      if (!definition || typeof definition.run !== "function") {
+        throw new Error(`ActionRegistry.register: "${type}" requires a run function`);
+      }
+      if (this._definitions.has(type)) {
+        throw new Error(`ActionRegistry.register: "${type}" is already registered`);
+      }
+      const params = Array.isArray(definition.params) ? definition.params : [];
+      const normalized = Object.freeze({
+        type,
+        label: definition.label || type,
+        params: Object.freeze(params.map((descriptor) => normalizeDescriptor(descriptor, type))),
+        run: definition.run
+      });
+      this._definitions.set(type, normalized);
+      return normalized;
+    }
+    has(type) {
+      return this._definitions.has(type);
+    }
+    get(type) {
+      return this._definitions.get(type);
+    }
+    unregister(type) {
+      return this._definitions.delete(type);
+    }
+    /** Every registered definition, for an editor's action picker. */
+    list() {
+      return Array.from(this._definitions.values());
+    }
+    /** The parameter descriptors an editor renders fields from, or []. */
+    describe(type) {
+      const definition = this._definitions.get(type);
+      return definition ? definition.params : [];
+    }
+    /**
+     * Validate a `{ type, params }` pair without running it.
+     * @returns {{valid: true, params: object}|{valid: false, error: string}}
+     */
+    validate(type, params) {
+      const definition = this._definitions.get(type);
+      if (!definition) return { valid: false, error: `unknown action type "${type}"` };
+      return validateParams(definition, params);
+    }
+    /**
+     * Run an action against its target Pin.
+     *
+     * @param {string} type an action name; an unknown one throws, never runs
+     * @param {Pin} target the Pin the action mutates
+     * @param {object} params raw parameters, validated and coerced here
+     * @param {object} [context] `{ session, source, event }` handed to `run`
+     * @returns {*} whatever the action's `run` returned
+     * @throws {TypeError} on an unknown type or invalid parameters
+     */
+    run(type, target, params, context = {}) {
+      const definition = this._definitions.get(type);
+      if (!definition) throw new TypeError(`ActionRegistry.run: unknown action type "${type}"`);
+      const result = validateParams(definition, params);
+      if (!result.valid) throw new TypeError(`ActionRegistry.run: ${result.error}`);
+      return definition.run(target, result.params, context);
+    }
+  };
+  var STYLE_PARAM_OPTIONS = Object.freeze(
+    STYLE_PROPERTIES.map((entry) => Object.freeze({ value: entry.property, label: entry.label }))
+  );
+  var VISIBILITY_MODES = Object.freeze([
+    Object.freeze({ value: "toggle", label: "Toggle" }),
+    Object.freeze({ value: "hide", label: "Hide" }),
+    Object.freeze({ value: "show", label: "Show" })
+  ]);
+  function runToggleVisibility(target, params) {
+    const element = target && target.element;
+    if (!element || !element.style) return false;
+    const hidden = element.style.getPropertyValue("visibility") === "hidden";
+    const next = params.mode === "hide" ? true : params.mode === "show" ? false : !hidden;
+    if (next) element.style.setProperty("visibility", "hidden");
+    else element.style.removeProperty("visibility");
+    return next;
+  }
+  function registerBuiltinActions(registry) {
+    registry.register("set-content", {
+      label: "Set content",
+      params: [
+        { key: "key", label: "Content key", control: "text", placeholder: "title" },
+        { key: "value", label: "Value", control: "text" }
+      ],
+      run: (target, params) => target.setContent(params.key, params.value)
+    });
+    registry.register("set-style", {
+      label: "Set style",
+      params: [
+        { key: "property", label: "Property", control: "select", options: STYLE_PARAM_OPTIONS },
+        { key: "value", label: "CSS value", control: "text", placeholder: "e.g. #ff0000" }
+      ],
+      run: (target, params) => setPinStyle(target, params.property, params.value)
+    });
+    registry.register("toggle-visibility", {
+      label: "Toggle visibility",
+      params: [
+        { key: "mode", label: "Mode", control: "select", options: VISIBILITY_MODES, required: false }
+      ],
+      run: runToggleVisibility
+    });
+    registry.register("focus", {
+      label: "Focus (zoom to)",
+      params: [
+        { key: "promote", label: "Zoom in", control: "checkbox", required: false }
+      ],
+      run: (target, params) => {
+        const session = target && target.session;
+        if (!session) return null;
+        return session.focus(target, { promote: Boolean(params.promote) });
+      }
+    });
+    return registry;
+  }
+  var actionRegistry = registerBuiltinActions(new ActionRegistry());
+
+  // pins/reactions.js
+  var SIGNAL_SET = new Set(PIN_SIGNAL_TYPES);
+  function freshId() {
+    return `rx_${Math.random().toString(36).slice(2, 10)}`;
+  }
+  var ReactionStore = class {
+    constructor(registry = actionRegistry) {
+      this.registry = registry;
+      this._bindings = /* @__PURE__ */ new Map();
+    }
+    /**
+     * Add a binding, validating its signal and its action's parameters.
+     *
+     * @param {{id?: string, sourcePinId: string, signal: string,
+     *   action: {type: string, targetPinId: string, params?: object}}} binding
+     * @returns {object} the stored, normalized binding
+     * @throws {TypeError} on a bad signal, unknown action, or invalid parameters
+     */
+    add(binding) {
+      const normalized = this._normalize(binding);
+      this._bindings.set(normalized.id, normalized);
+      return normalized;
+    }
+    /** Normalize and validate a binding without storing it. */
+    _normalize(binding) {
+      const source = binding && typeof binding === "object" ? binding : {};
+      const action = source.action && typeof source.action === "object" ? source.action : {};
+      if (typeof source.sourcePinId !== "string" || source.sourcePinId === "") {
+        throw new TypeError("ReactionStore.add: a sourcePinId is required");
+      }
+      if (!SIGNAL_SET.has(source.signal)) {
+        throw new TypeError(`ReactionStore.add: "${source.signal}" is not a Pin signal`);
+      }
+      if (typeof action.targetPinId !== "string" || action.targetPinId === "") {
+        throw new TypeError("ReactionStore.add: an action.targetPinId is required");
+      }
+      const result = this.registry.validate(action.type, action.params);
+      if (!result.valid) throw new TypeError(`ReactionStore.add: ${result.error}`);
+      return {
+        id: typeof source.id === "string" && source.id ? source.id : freshId(),
+        sourcePinId: source.sourcePinId,
+        signal: source.signal,
+        action: { type: action.type, targetPinId: action.targetPinId, params: result.params }
+      };
+    }
+    remove(id) {
+      return this._bindings.delete(id);
+    }
+    get(id) {
+      return this._bindings.get(id);
+    }
+    /** Every binding, in insertion order. */
+    all() {
+      return Array.from(this._bindings.values());
+    }
+    /** Every binding fired by a Pin, whatever the signal. */
+    forSource(pinId) {
+      return this.all().filter((binding) => binding.sourcePinId === pinId);
+    }
+    /** The bindings a given signal on a given Pin should run. */
+    matching(pinId, signal) {
+      return this.all().filter((binding) => binding.sourcePinId === pinId && binding.signal === signal);
+    }
+    /** Whether any binding names this Pin as either end. */
+    references(pinId) {
+      return this.all().some((binding) => binding.sourcePinId === pinId || binding.action.targetPinId === pinId);
+    }
+    /**
+     * Drop every binding that names this Pin as source or target.
+     * @returns {number} how many bindings were removed
+     */
+    pruneForPin(pinId) {
+      let removed = 0;
+      for (const [id, binding] of this._bindings) {
+        if (binding.sourcePinId === pinId || binding.action.targetPinId === pinId) {
+          this._bindings.delete(id);
+          removed += 1;
+        }
+      }
+      return removed;
+    }
+    clear() {
+      this._bindings.clear();
+    }
+    /** Every binding as a plain, JSON-safe object (the serialization surface). */
+    toJSON() {
+      return this.all().map((binding) => ({
+        id: binding.id,
+        sourcePinId: binding.sourcePinId,
+        signal: binding.signal,
+        action: {
+          type: binding.action.type,
+          targetPinId: binding.action.targetPinId,
+          params: { ...binding.action.params }
+        }
+      }));
+    }
+    /**
+     * Replace the store's contents from a persisted list.
+     *
+     * Clears first, so loading a saved canvas over a live one is a replace, not a
+     * merge - the same semantics `clearCanvas` gives the Pins themselves. A binding
+     * that fails validation, or (given `pinExists`) names a Pin that did not come
+     * back, is skipped with a warning rather than thrown: a canvas that restores
+     * nine bindings out of ten is worth more than one that restores none.
+     *
+     * @param {object[]} list
+     * @param {{pinExists?: (id: string) => boolean, warn?: (message: string) => void}} [options]
+     * @returns {string[]} the warnings collected
+     */
+    load(list, options = {}) {
+      this.clear();
+      const warnings = [];
+      const exists = typeof options.pinExists === "function" ? options.pinExists : null;
+      const warn = (message) => {
+        warnings.push(message);
+        if (options.warn) options.warn(message);
+      };
+      for (const raw of Array.isArray(list) ? list : []) {
+        const bad = exists ? this._danglingEnd(raw, exists) : null;
+        if (bad) {
+          warn(`reaction skipped: ${bad}`);
+          continue;
+        }
+        try {
+          this.add(raw);
+        } catch (error) {
+          warn(`reaction skipped: ${error.message}`);
+        }
+      }
+      return warnings;
+    }
+    /** The description of a missing endpoint, or null when both resolve. */
+    _danglingEnd(raw, exists) {
+      const source = raw && typeof raw === "object" ? raw : {};
+      const action = source.action && typeof source.action === "object" ? source.action : {};
+      if (source.sourcePinId && !exists(source.sourcePinId)) return `source pin "${source.sourcePinId}" is gone`;
+      if (action.targetPinId && !exists(action.targetPinId)) return `target pin "${action.targetPinId}" is gone`;
+      return null;
+    }
+  };
+  var ReactionRunner = class {
+    constructor(session, store, registry = actionRegistry) {
+      this.session = session;
+      this.store = store;
+      this.registry = registry;
+      this._unsubscribe = null;
+      this._onSignal = this._onSignal.bind(this);
+    }
+    /** Begin observing the session's Pin signals. Idempotent. */
+    attach() {
+      if (this._unsubscribe) return this;
+      this._unsubscribe = this.session.pinManager.onSignal(this._onSignal);
+      return this;
+    }
+    /** Stop observing. */
+    detach() {
+      if (this._unsubscribe) this._unsubscribe();
+      this._unsubscribe = null;
+      return this;
+    }
+    /** One relayed Pin signal: prune on a death, otherwise run what it fires. */
+    _onSignal(event) {
+      const source = event && event.detail ? event.detail.source : null;
+      if (!source || source.utility) return;
+      if (event.type === "destroy") {
+        this.store.pruneForPin(source.id);
+        return;
+      }
+      const bindings = this.store.matching(source.id, event.type);
+      for (const binding of bindings) this._run(binding, source, event);
+    }
+    /**
+     * Run one binding's action against its target, if the target still exists.
+     *
+     * A missing target is the runtime orphan case: skipped, never thrown. A `run`
+     * that itself throws is contained to its own binding, so one broken action
+     * cannot take the bus - or the next binding on the same signal - down with it.
+     */
+    _run(binding, source, event) {
+      const { type, targetPinId, params } = binding.action;
+      const target = this.session.getPin(targetPinId);
+      if (!target) return;
+      try {
+        this.registry.run(type, target, params, { session: this.session, source, target, event });
+      } catch (error) {
+        if (typeof console !== "undefined") {
+          console.error(`[CloudCanvas] reaction "${binding.id}" (${type}) failed`, error);
+        }
+      }
+    }
+  };
+  var STORES = /* @__PURE__ */ new WeakMap();
+  var RUNNERS = /* @__PURE__ */ new WeakMap();
+  function reactionsFor(session) {
+    let store = STORES.get(session);
+    if (!store) {
+      store = new ReactionStore();
+      STORES.set(session, store);
+    }
+    return store;
+  }
+  function attachReactions(session, options = {}) {
+    const store = reactionsFor(session);
+    if (Array.isArray(options.bindings)) {
+      store.load(options.bindings, { pinExists: (id) => Boolean(session.getPin(id)) });
+    }
+    const existing = RUNNERS.get(session);
+    if (existing) existing.detach();
+    const runner = new ReactionRunner(session, store).attach();
+    RUNNERS.set(session, runner);
+    return { store, runner, detach: () => detachReactions(session) };
+  }
+  function detachReactions(session) {
+    const runner = RUNNERS.get(session);
+    if (runner) runner.detach();
+    RUNNERS.delete(session);
+  }
 
   // pins/traits/define-component.js
   function defineComponent(spec = {}) {

@@ -784,14 +784,22 @@ function decorateTrigger(button) {
  *   |{mode:'box', rect:DOMRect, preferSide:'left'|'right', allowFlip:boolean}} anchor
  * @returns {'left'|'right'|null} the side a box was placed on; null for a point
  */
+const EMPTY_INSETS = Object.freeze({ top: 0, right: 0, bottom: 0, left: 0 });
+
 function placeInHost(session, element, anchor) {
   const hostRect = session.getHostRect();
+  // The host is the whole surface, but an application may float chrome over its
+  // edges -- a status bar, a toolbar -- and a menu clamped to the raw rect puts
+  // its last rows under that chrome: present to a hit test, invisible and
+  // unclickable to a person. `session.menuInsets` is how an app says which edges
+  // are spoken for; absent, it is the raw rect and nothing changes.
+  const inset = session.menuInsets || EMPTY_INSETS;
   // `|| 0` rather than a guard: a synthetic event with no coordinates opens the
   // menu in the host's top-left corner, which is a place - `NaNpx` is not.
-  const hostLeft = hostRect.left || 0;
-  const hostTop = hostRect.top || 0;
-  const hostRight = hostLeft + (hostRect.width || 0);
-  const hostBottom = hostTop + (hostRect.height || 0);
+  const hostLeft = (hostRect.left || 0) + (inset.left || 0);
+  const hostTop = (hostRect.top || 0) + (inset.top || 0);
+  const hostRight = (hostRect.left || 0) + (hostRect.width || 0) - (inset.right || 0);
+  const hostBottom = (hostRect.top || 0) + (hostRect.height || 0) - (inset.bottom || 0);
 
   // Preferred top-left in overlay-local coordinates: a point sits at the click, a
   // box top-aligned beside its trigger (its horizontal side is decided below).

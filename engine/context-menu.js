@@ -807,8 +807,37 @@ function placeInHost(session, element, anchor) {
   } else {
     clampFarEdge(element, 'left', box.right, hostRight);
   }
-  clampFarEdge(element, 'top', box.bottom, hostBottom);
+  if (!placeAbove(element, anchor, box, hostTop, hostBottom)) {
+    clampFarEdge(element, 'top', box.bottom, hostBottom);
+  }
   return side;
+}
+
+/**
+ * Open upward when there is no room below, the way every desktop menu does.
+ *
+ * Clamping is the wrong answer for a menu anchored near the bottom edge: it
+ * slides the panel up until its *bottom* fits, which walks the panel back over
+ * its own trigger and leaves the last rows under whatever chrome sits on that
+ * edge -- reachable to a hit test, invisible and unclickable to a person. The
+ * flip keeps the anchor honest: the panel's bottom sits where its top would
+ * have, so it never covers the point it was opened from.
+ *
+ * Only for a point anchor. A flyout is placed beside its trigger by
+ * `placeBoxHorizontally`, and a vertical flip there would tear a chain apart.
+ *
+ * @returns {boolean} true when the panel was flipped and no clamp should follow
+ */
+function placeAbove(element, anchor, box, hostTop, hostBottom) {
+  if (anchor.mode === 'box') return false;
+  if (box.bottom <= hostBottom) return false;          // it fits below; nothing to do
+  const top = parseFloat(element.style.top) || 0;
+  const above = top - box.height;
+  // Above must be a real improvement, not a different overflow: a panel taller
+  // than the space above it stays below and takes the clamp.
+  if (above < 0 || box.height > (anchor.y || 0) - hostTop) return false;
+  element.style.top = `${above}px`;
+  return true;
 }
 
 /**
